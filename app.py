@@ -1,19 +1,21 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from io import BytesIO
 
 st.set_page_config(page_title="Promo Approval Tool", page_icon="📊", layout="wide")
-
 st.title("📊 Promo Approval Tool")
-st.markdown("Upload semua file yang dibutuhkan, lalu klik **Proses** untuk generate output.")
+st.markdown("Upload semua file, set M/E Target, lalu klik **Generate Output**.")
 st.divider()
 
-# ── Helper ───────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────
 def read_file(file):
-    if file.name.endswith(".csv"):
-        return pd.read_csv(file)
-    else:
-        return pd.read_excel(file)
+    return pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
+
+def round_to_900(price):
+    base = round(price / 1000) * 1000
+    candidate = base - 100
+    return candidate if abs(price - candidate) <= abs(price - (candidate + 1000)) else candidate + 1000
 
 def to_excel_download(df):
     buffer = BytesIO()
@@ -21,112 +23,165 @@ def to_excel_download(df):
         df.to_excel(writer, index=False, sheet_name="Output")
     return buffer.getvalue()
 
+def calc_predicted_me(new_final_prices, book_prices, qtys, store_sales, me_current, pc_store_current):
+    pc_new       = (book_prices - new_final_prices) / book_prices
+    price_chg    = (new_final_prices - book_prices * (1 - pc_store_current)) / (book_prices * (1 - pc_store_current) + 1e-9)
+    qty_new      = np.maximum(qtys * (1 - price_chg * 2.5), 0)
+    sm_new       = (qty_new * book_prices) / store_sales
+    sm_new       = sm_new / sm_new.sum() if sm_new.sum() > 0 else sm_new
+    pc_store_new = (pc_new * sm_new).sum()
+    predicted_me = me_current - (pc_store_new - pc_store_current) * 0.70
+    return predicted_me, pc_new, sm_new, qty_new
+
+def solve_new_prices(book_prices, final_prices, qtys, store_sales, me_current, pc_store_current, me_target):
+    pc_current_arr = (book_prices - final_prices) / book_prices
+    best_result, best_diff = None, 999
+    for delta in np.arange(-0.20, 0.20, 0.0005):
+        new_pc    = np.clip(pc_current_arr + delta, 0, 0.6)
+        new_final = np.array([round_to_900(p) for p in book_prices * (1 - new_pc)])
+        pred_me, pc_new, sm_new, qty_new = calc_predicted_me(
+            new_final, book_prices, qtys, store_sales, me_current, pc_store_current
+        )
+        diff = abs(pred_me - me_target)
+        if diff < best_diff:
+            best_diff   = diff
+            best_result = (new_final, pred_me, pc_new, sm_new, qty_new)
+    return best_result, best_diff
+
 # ── Upload Files ─────────────────────────────────────────────────
 st.subheader("📁 Upload Files")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    promo_input = st.file_uploader("1. Promo Input", type=["xlsx", "csv"])
-with col2:
-    promo_me = st.file_uploader("2. M/E Component (Promo M/E)", type=["xlsx", "csv"])
-with col3:
-    me_per_store = st.file_uploader("3. M/E Per Store (Raw Data)", type=["xlsx", "csv"])
-with col4:
-    sales_mix = st.file_uploader("4. Sales Mix (Raw Data)", type=["xlsx", "csv"])
+col1, col2, col3 = st.columns(3)
+with col1: promo_input  = st.file_uploader("1. Promo Input",          type=["xlsx","csv"])
+with col2: me_per_store = st.file_uploader("2. M/E Per Store",        type=["xlsx","csv"])
+with col3: sales_mix    = st.file_uploader("3. Sales Mix (Raw Data)", type=["xlsx","csv"])
 
 st.divider()
 
 # ── Status ───────────────────────────────────────────────────────
 st.subheader("📋 Status Upload")
-status_cols = st.columns(4)
-files = {
-    "Promo Input": promo_input,
-    "M/E Component": promo_me,
-    "M/E Per Store": me_per_store,
-    "Sales Mix": sales_mix,
-}
-for i, (name, file) in enumerate(files.items()):
-    with status_cols[i]:
-        if file:
-            st.success(f"✅ {name}")
-        else:
-            st.warning(f"⏳ {name}")
+files = {"Promo Input": promo_input, "M/E Per Store": me_per_store, "Sales Mix": sales_mix}
+scols = st.columns(3)
+for i, (name, f) in enumerate(files.items()):
+    with scols[i]:
+        st.success(f"✅ {name}") if f else st.warning(f"⏳ {name}")
 
 st.divider()
 
-# ── Process ──────────────────────────────────────────────────────
+# ── M/E Target ───────────────────────────────────────────────────
+st.subheader("🎯 M/E Target")
+me_target_input = st.number_input(
+    "Masukkan M/E Target (%)", min_value=0.0, max_value=100.0,
+    value=28.0, step=0.1, format="%.1f"
+)
+me_target = me_target_input / 100
+
+st.divider()
+
+# ── Generate ─────────────────────────────────────────────────────
 all_uploaded = all(files.values())
 
 if st.button("🚀 Generate Output", type="primary", use_container_width=True, disabled=not all_uploaded):
     with st.spinner("Memproses data..."):
         try:
             df_promo    = read_file(promo_input)
-            df_me       = read_file(promo_me)
             df_me_store = read_file(me_per_store)
             df_sales    = read_file(sales_mix)
 
-            # Get latest M/E per store
+            # Latest ME store (Grab)
             df_me_store['Month'] = pd.to_datetime(df_me_store['Month'])
             df_me_store_latest = (
-                df_me_store
-                .sort_values('Month')
-                .groupby(['Platform', 'Store Brand'])
-                .last()
-                .reset_index()
+                df_me_store[df_me_store['Platform'] == 'Grab']
+                .sort_values('Month').groupby(['Platform','Store Brand']).last().reset_index()
+                .rename(columns={'M/E Store':'ME_Store_Pct','M/E Store.1':'Store_Sales'})
+            )
+            df_me_store_latest['ME_Store_Pct'] = (
+                df_me_store_latest['ME_Store_Pct'].str.replace('%','').astype(float) / 100
             )
 
-            # Aggregate qty total from sales mix
+            # Qty total (Grab)
             df_qty = (
-                df_sales
-                .groupby(['menu_code', 'visit_purpose_name'])['qty_total']
-                .sum()
-                .reset_index()
-            )
-            df_qty.columns = ['Menu Code Child', 'Platform', 'Qty Total']
-
-            # Build output
-            output = df_promo[[
-                'Platform', 'Store Brand', 'Menu Name',
-                'Platform Price', 'Book Price', 'Final Price',
-                'Menu Code Child', 'Net Price'
-            ]].copy()
-
-            # Join M/E %
-            output = output.merge(
-                df_me[['Menu Code Child', 'Platform', 'M/E Parent']],
-                on=['Menu Code Child', 'Platform'],
-                how='left'
+                df_sales[df_sales['visit_purpose_name'] == 'Grab']
+                .groupby(['menu_code','visit_purpose_name'])['qty_total'].sum().reset_index()
+                .rename(columns={'menu_code':'Menu Code Child','visit_purpose_name':'Platform','qty_total':'Qty'})
             )
 
-            # Join M/E per store
-            output = output.merge(
-                df_me_store_latest[['Platform', 'Store Brand', 'M/E Store']],
-                on=['Platform', 'Store Brand'],
-                how='left'
+            # Build base (Grab only)
+            output = df_promo[df_promo['Platform'] == 'Grab'].copy()
+            output = output.merge(df_me_store_latest[['Platform','Store Brand','ME_Store_Pct','Store_Sales']], on=['Platform','Store Brand'], how='left')
+            output = output.merge(df_qty, on=['Menu Code Child','Platform'], how='left')
+
+            # Current calculations
+            output['Price_Cut_Current'] = (output['Book Price'] - output['Final Price']) / output['Book Price']
+            output['Sales_Mix_Current'] = (output['Qty'] * output['Book Price']) / output['Store_Sales']
+            total_sm = output['Sales_Mix_Current'].sum()
+            output['Sales_Mix_Current'] = output['Sales_Mix_Current'] / total_sm
+            pc_store_current = (output['Price_Cut_Current'] * output['Sales_Mix_Current']).sum()
+
+            book_prices  = output['Book Price'].values.astype(float)
+            final_prices = output['Final Price'].values.astype(float)
+            qtys         = output['Qty'].values.astype(float)
+            store_sales  = output['Store_Sales'].iloc[0]
+            me_current   = output['ME_Store_Pct'].iloc[0]
+            me_sku       = output['Promo ME'].values.astype(float)
+
+            # Solve
+            best_result, best_diff = solve_new_prices(
+                book_prices, final_prices, qtys, store_sales,
+                me_current, pc_store_current, me_target
             )
+            new_finals, pred_me, pc_new, sm_new, qty_new = best_result
 
-            # Join Qty Total
-            output = output.merge(
-                df_qty,
-                on=['Menu Code Child', 'Platform'],
-                how='left'
-            )
+            output['New_Final_Price']    = new_finals
+            output['New_Price_Cut']      = pc_new
+            output['New_Sales_Mix']      = sm_new
+            output['Predicted_ME_Store'] = pred_me
 
-            # Rename columns
-            output = output.rename(columns={'M/E Parent': 'M/E (%)'})
+            # Max diff check (3%)
+            me_range = me_sku.max() - me_sku.min()
+            me_flag  = me_range > 0.03
 
-            st.success(f"✅ Output berhasil dibuat! {len(output)} baris data.")
+            # ── Build display table ───────────────────────────────
+            display = pd.DataFrame({
+                'Platform':         output['Platform'],
+                'Store Brand':      output['Store Brand'],
+                'Menu Name':        output['Menu Name'],
+                'Platform Price':   output['Platform Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'Book Price':       output['Book Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'Final Price':      output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'Price Cut (cur)':  output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
+                'M/E SKU (cur)':    output['Promo ME'].apply(lambda x: f"{x*100:.2f}%"),
+                'Sales Mix (cur)':  output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
+                'New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'New Price Cut':    output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
+                'New Sales Mix':    output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
+                'Predicted M/E':    output['Predicted_ME_Store'].apply(lambda x: f"{x*100:.2f}%"),
+            })
+
+            # ── Results ───────────────────────────────────────────
             st.divider()
+            st.subheader("📤 Output")
 
-            # ── Preview ──────────────────────────────────────────
-            st.subheader("👀 Preview Output")
-            st.dataframe(output, use_container_width=True)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("M/E Current",    f"{me_current*100:.2f}%")
+            m2.metric("M/E Target",     f"{me_target*100:.2f}%")
+            m3.metric("Predicted M/E",  f"{pred_me*100:.2f}%")
+            m4.metric("Diff vs Target", f"{abs(pred_me - me_target)*100:.3f}%")
 
-            # ── Download ─────────────────────────────────────────
+            if me_flag:
+                st.warning(f"⚠️ Gap M/E antar SKU = {me_range*100:.2f}% — melebihi batas 3%!")
+            else:
+                st.success(f"✅ Gap M/E antar SKU = {me_range*100:.2f}% — dalam batas 3%")
+
+            if abs(pred_me - me_target) <= 0.002:
+                st.success(f"✅ Predicted M/E {pred_me*100:.2f}% — dalam toleransi ±0.2% dari target")
+            else:
+                st.warning(f"⚠️ Predicted M/E {pred_me*100:.2f}% — di luar toleransi ±0.2% dari target")
+
+            st.dataframe(display, use_container_width=True)
+
             st.download_button(
                 label="⬇️ Download Output (Excel)",
-                data=to_excel_download(output),
+                data=to_excel_download(display),
                 file_name="promo_approval_output.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
@@ -134,6 +189,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
 
         except Exception as e:
             st.error(f"❌ Error: {e}")
+            st.exception(e)
 
 if not all_uploaded:
-    st.caption("⬆️ Upload semua 4 file dulu untuk mengaktifkan tombol.")
+    st.caption("⬆️ Upload semua 3 file dulu untuk mengaktifkan tombol.")
