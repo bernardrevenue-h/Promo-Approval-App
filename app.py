@@ -5,10 +5,15 @@ from io import BytesIO
 
 st.set_page_config(page_title="Promo Approval Tool", page_icon="📊", layout="wide")
 st.title("📊 Promo Approval Tool")
-st.markdown("Upload satu file Excel dengan 3 sheet, set M/E Target, lalu klik **Generate Output**.")
+st.markdown("Upload satu file Excel dengan sheet: Promo Input, ME Per Store, Sales Mix.")
 st.divider()
 
 # ── Helpers ──────────────────────────────────────────────────────
+def read_sheet(file, sheet_name):
+    df = pd.read_excel(file, sheet_name=sheet_name, header=1)
+    df.columns = df.columns.str.strip()
+    return df
+
 def round_to_900(price):
     base = round(price / 1000) * 1000
     candidate = base - 100
@@ -48,7 +53,7 @@ def solve_new_prices(book_prices, final_prices, qtys, store_sales, me_current, p
 # ── Upload File ───────────────────────────────────────────────────
 st.subheader("📁 Upload File")
 uploaded_file = st.file_uploader(
-    "Upload file Excel (.xlsx) dengan 3 sheet: Promo Input, ME Per Store, Sales Mix",
+    "Upload file Excel (.xlsx) — sheet: Promo Input, ME Per Store, Sales Mix",
     type=["xlsx"]
 )
 
@@ -61,17 +66,17 @@ if uploaded_file:
             st.error(f"❌ Sheet tidak ditemukan: {', '.join(missing)}")
             st.stop()
         else:
-            st.success(f"✅ File berhasil dibaca — sheet ditemukan: {', '.join(required_sheets)}")
+            st.success(f"✅ File berhasil dibaca — sheet: {', '.join(required_sheets)}")
     except Exception as e:
         st.error(f"❌ Gagal membaca file: {e}")
         st.stop()
 
 st.divider()
 
-# ── M/E Target ───────────────────────────────────────────────────
-st.subheader("🎯 M/E Target")
+# ── ME Target ────────────────────────────────────────────────────
+st.subheader("🎯 ME Target")
 me_target_input = st.number_input(
-    "Masukkan M/E Target (%)", min_value=0.0, max_value=100.0,
+    "Masukkan ME Target (%)", min_value=0.0, max_value=100.0,
     value=28.0, step=0.1, format="%.1f"
 )
 me_target = me_target_input / 100
@@ -82,39 +87,51 @@ st.divider()
 if st.button("🚀 Generate Output", type="primary", use_container_width=True, disabled=not uploaded_file):
     with st.spinner("Memproses data..."):
         try:
-            df_promo    = pd.read_excel(uploaded_file, sheet_name="Promo Input")
-            df_me_store = pd.read_excel(uploaded_file, sheet_name="ME Per Store")
-            df_sales    = pd.read_excel(uploaded_file, sheet_name="Sales Mix")
+            df_promo    = read_sheet(uploaded_file, "Promo Input")
+            df_me_store = read_sheet(uploaded_file, "ME Per Store")
+            df_sales    = read_sheet(uploaded_file, "Sales Mix")
 
-            # Latest ME store (Grab)
-            df_me_store['Month'] = pd.to_datetime(df_me_store['Month'])
+            # ── ME Per Store: ambil latest per store + platform ──
+            df_me_store['monday_of_week'] = pd.to_datetime(df_me_store['monday_of_week'])
+            df_me_store = df_me_store[df_me_store['visit_purpose_name'] == 'Grab']
             df_me_store_latest = (
-                df_me_store[df_me_store['Platform'] == 'Grab']
-                .sort_values('Month')
-                .groupby(['Platform', 'Store Brand'])
+                df_me_store
+                .sort_values('monday_of_week')
+                .groupby(['visit_purpose_name', 'store_brand_owner'])
                 .last()
                 .reset_index()
-                .rename(columns={'M/E Store': 'ME_Store_Pct', 'M/E Store.1': 'Store_Sales'})
-            )
-            df_me_store_latest['ME_Store_Pct'] = (
-                df_me_store_latest['ME_Store_Pct'].str.replace('%', '').astype(float) / 100
+                .rename(columns={
+                    'visit_purpose_name': 'Platform',
+                    'store_brand_owner':  'Store Brand',
+                    'store_me_percent':   'ME_Store_Pct',
+                    'gross_sales':        'Store_Sales'
+                })
             )
 
-            # Qty total (Grab)
+            # ── Sales Mix: qty per menu_code + platform ──────────
+            df_sales['monday_of_week'] = pd.to_datetime(df_sales['monday_of_week'])
             df_qty = (
                 df_sales[df_sales['visit_purpose_name'] == 'Grab']
                 .groupby(['menu_code', 'visit_purpose_name'])['qty_total']
                 .sum()
                 .reset_index()
-                .rename(columns={'menu_code': 'Menu Code Child', 'visit_purpose_name': 'Platform', 'qty_total': 'Qty'})
+                .rename(columns={
+                    'menu_code':           'Menu Code Child',
+                    'visit_purpose_name':  'Platform',
+                    'qty_total':           'Qty'
+                })
             )
 
-            # Build base (Grab only)
+            # ── Build base (Grab only) ────────────────────────────
             output = df_promo[df_promo['Platform'] == 'Grab'].copy()
-            output = output.merge(df_me_store_latest[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales']], on=['Platform', 'Store Brand'], how='left')
+            output = output.merge(
+                df_me_store_latest[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales']],
+                on=['Platform', 'Store Brand'], how='left'
+            )
             output = output.merge(df_qty, on=['Menu Code Child', 'Platform'], how='left')
 
-            # Current calculations
+            # ── Current calculations ──────────────────────────────
+            output['ME_SKU'] = pd.to_numeric(output['M/E (%)'], errors='coerce')
             output['Price_Cut_Current'] = (output['Book Price'] - output['Final Price']) / output['Book Price']
             output['Sales_Mix_Current'] = (output['Qty'] * output['Book Price']) / output['Store_Sales']
             total_sm = output['Sales_Mix_Current'].sum()
@@ -126,9 +143,9 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             qtys         = output['Qty'].values.astype(float)
             store_sales  = output['Store_Sales'].iloc[0]
             me_current   = output['ME_Store_Pct'].iloc[0]
-            me_sku       = output['Promo ME'].values.astype(float)
+            me_sku       = output['ME_SKU'].values.astype(float)
 
-            # Solve
+            # ── Solve ─────────────────────────────────────────────
             best_result, best_diff = solve_new_prices(
                 book_prices, final_prices, qtys, store_sales,
                 me_current, pc_store_current, me_target
@@ -144,7 +161,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             me_range = me_sku.max() - me_sku.min()
             me_flag  = me_range > 0.03
 
-            # ── Build display table ───────────────────────────────
+            # ── Display table ─────────────────────────────────────
             display = pd.DataFrame({
                 'Platform':        output['Platform'],
                 'Store Brand':     output['Store Brand'],
@@ -153,12 +170,12 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 'Book Price':      output['Book Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'Final Price':     output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'Price Cut (cur)': output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
-                'M/E SKU (cur)':   output['Promo ME'].apply(lambda x: f"{x*100:.2f}%"),
+                'ME SKU (cur)':    output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
                 'Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
                 'New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'New Price Cut':   output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
                 'New Sales Mix':   output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
-                'Predicted M/E':   output['Predicted_ME_Store'].apply(lambda x: f"{x*100:.2f}%"),
+                'Predicted ME':    output['Predicted_ME_Store'].apply(lambda x: f"{x*100:.2f}%"),
             })
 
             # ── Results ───────────────────────────────────────────
@@ -166,20 +183,20 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             st.subheader("📤 Output")
 
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("M/E Current",    f"{me_current*100:.2f}%")
-            m2.metric("M/E Target",     f"{me_target*100:.2f}%")
-            m3.metric("Predicted M/E",  f"{pred_me*100:.2f}%")
+            m1.metric("ME Current",     f"{me_current*100:.2f}%")
+            m2.metric("ME Target",      f"{me_target*100:.2f}%")
+            m3.metric("Predicted ME",   f"{pred_me*100:.2f}%")
             m4.metric("Diff vs Target", f"{abs(pred_me - me_target)*100:.3f}%")
 
             if me_flag:
-                st.warning(f"⚠️ Gap M/E antar SKU = {me_range*100:.2f}% — melebihi batas 3%!")
+                st.warning(f"⚠️ Gap ME antar SKU = {me_range*100:.2f}% — melebihi batas 3%!")
             else:
-                st.success(f"✅ Gap M/E antar SKU = {me_range*100:.2f}% — dalam batas 3%")
+                st.success(f"✅ Gap ME antar SKU = {me_range*100:.2f}% — dalam batas 3%")
 
             if abs(pred_me - me_target) <= 0.002:
-                st.success(f"✅ Predicted M/E {pred_me*100:.2f}% — dalam toleransi ±0.2% dari target")
+                st.success(f"✅ Predicted ME {pred_me*100:.2f}% — dalam toleransi ±0.2% dari target")
             else:
-                st.warning(f"⚠️ Predicted M/E {pred_me*100:.2f}% — di luar toleransi ±0.2% dari target")
+                st.warning(f"⚠️ Predicted ME {pred_me*100:.2f}% — di luar toleransi ±0.2% dari target")
 
             st.dataframe(display, use_container_width=True)
 
