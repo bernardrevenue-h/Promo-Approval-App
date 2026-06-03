@@ -63,7 +63,7 @@ files = {"Promo Input": promo_input, "M/E Per Store": me_per_store, "Sales Mix":
 scols = st.columns(3)
 for i, (name, f) in enumerate(files.items()):
     with scols[i]:
-        st.success(f"✅ {name}") if f else st.warning(f"⏳ {name}")
+        st.subheader("📋 Status Upload") files = {"Promo Input": promo_input, "M/E Per Store": me_per_store, "Sales Mix": sales_mix} scols = st.columns(3) for i, (name, f) in enumerate(files.items()):     with scols[i]:         if f:             st.success(f"✅ {name}")         else:             st.warning(f"⏳ {name}")
 
 st.divider()
 
