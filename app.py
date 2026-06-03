@@ -51,9 +51,12 @@ def solve_new_prices(book_prices, final_prices, qtys, store_sales, me_current, p
 # ── Upload Files ─────────────────────────────────────────────────
 st.subheader("📁 Upload Files")
 col1, col2, col3 = st.columns(3)
-with col1: promo_input  = st.file_uploader("1. Promo Input",          type=["xlsx","csv"])
-with col2: me_per_store = st.file_uploader("2. M/E Per Store",        type=["xlsx","csv"])
-with col3: sales_mix    = st.file_uploader("3. Sales Mix (Raw Data)", type=["xlsx","csv"])
+with col1:
+    promo_input = st.file_uploader("1. Promo Input", type=["xlsx", "csv"])
+with col2:
+    me_per_store = st.file_uploader("2. M/E Per Store", type=["xlsx", "csv"])
+with col3:
+    sales_mix = st.file_uploader("3. Sales Mix (Raw Data)", type=["xlsx", "csv"])
 
 st.divider()
 
@@ -63,7 +66,10 @@ files = {"Promo Input": promo_input, "M/E Per Store": me_per_store, "Sales Mix":
 scols = st.columns(3)
 for i, (name, f) in enumerate(files.items()):
     with scols[i]:
-        st.subheader("📋 Status Upload") files = {"Promo Input": promo_input, "M/E Per Store": me_per_store, "Sales Mix": sales_mix} scols = st.columns(3) for i, (name, f) in enumerate(files.items()):     with scols[i]:         if f:             st.success(f"✅ {name}")         else:             st.warning(f"⏳ {name}")
+        if f:
+            st.success(f"✅ {name}")
+        else:
+            st.warning(f"⏳ {name}")
 
 st.divider()
 
@@ -91,24 +97,29 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             df_me_store['Month'] = pd.to_datetime(df_me_store['Month'])
             df_me_store_latest = (
                 df_me_store[df_me_store['Platform'] == 'Grab']
-                .sort_values('Month').groupby(['Platform','Store Brand']).last().reset_index()
-                .rename(columns={'M/E Store':'ME_Store_Pct','M/E Store.1':'Store_Sales'})
+                .sort_values('Month')
+                .groupby(['Platform', 'Store Brand'])
+                .last()
+                .reset_index()
+                .rename(columns={'M/E Store': 'ME_Store_Pct', 'M/E Store.1': 'Store_Sales'})
             )
             df_me_store_latest['ME_Store_Pct'] = (
-                df_me_store_latest['ME_Store_Pct'].str.replace('%','').astype(float) / 100
+                df_me_store_latest['ME_Store_Pct'].str.replace('%', '').astype(float) / 100
             )
 
             # Qty total (Grab)
             df_qty = (
                 df_sales[df_sales['visit_purpose_name'] == 'Grab']
-                .groupby(['menu_code','visit_purpose_name'])['qty_total'].sum().reset_index()
-                .rename(columns={'menu_code':'Menu Code Child','visit_purpose_name':'Platform','qty_total':'Qty'})
+                .groupby(['menu_code', 'visit_purpose_name'])['qty_total']
+                .sum()
+                .reset_index()
+                .rename(columns={'menu_code': 'Menu Code Child', 'visit_purpose_name': 'Platform', 'qty_total': 'Qty'})
             )
 
             # Build base (Grab only)
             output = df_promo[df_promo['Platform'] == 'Grab'].copy()
-            output = output.merge(df_me_store_latest[['Platform','Store Brand','ME_Store_Pct','Store_Sales']], on=['Platform','Store Brand'], how='left')
-            output = output.merge(df_qty, on=['Menu Code Child','Platform'], how='left')
+            output = output.merge(df_me_store_latest[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales']], on=['Platform', 'Store Brand'], how='left')
+            output = output.merge(df_qty, on=['Menu Code Child', 'Platform'], how='left')
 
             # Current calculations
             output['Price_Cut_Current'] = (output['Book Price'] - output['Final Price']) / output['Book Price']
@@ -142,19 +153,19 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
 
             # ── Build display table ───────────────────────────────
             display = pd.DataFrame({
-                'Platform':         output['Platform'],
-                'Store Brand':      output['Store Brand'],
-                'Menu Name':        output['Menu Name'],
-                'Platform Price':   output['Platform Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'Book Price':       output['Book Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'Final Price':      output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'Price Cut (cur)':  output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
-                'M/E SKU (cur)':    output['Promo ME'].apply(lambda x: f"{x*100:.2f}%"),
-                'Sales Mix (cur)':  output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
+                'Platform':        output['Platform'],
+                'Store Brand':     output['Store Brand'],
+                'Menu Name':       output['Menu Name'],
+                'Platform Price':  output['Platform Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'Book Price':      output['Book Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'Final Price':     output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'Price Cut (cur)': output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
+                'M/E SKU (cur)':   output['Promo ME'].apply(lambda x: f"{x*100:.2f}%"),
+                'Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
                 'New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'New Price Cut':    output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
-                'New Sales Mix':    output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
-                'Predicted M/E':    output['Predicted_ME_Store'].apply(lambda x: f"{x*100:.2f}%"),
+                'New Price Cut':   output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
+                'New Sales Mix':   output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
+                'Predicted M/E':   output['Predicted_ME_Store'].apply(lambda x: f"{x*100:.2f}%"),
             })
 
             # ── Results ───────────────────────────────────────────
