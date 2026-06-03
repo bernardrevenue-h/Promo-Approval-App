@@ -188,6 +188,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 'Final Price':     output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'Price Cut (cur)': output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
                 'ME SKU (cur)':    output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
+                'Qty (cur)':       output['Qty'].apply(lambda x: f"{x:,.0f}"),
                 'Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
                 'New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'New Price Cut':   output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
