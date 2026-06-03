@@ -10,75 +10,135 @@ st.divider()
 
 # ── Helpers ──────────────────────────────────────────────────────
 def read_sheet(file, sheet_name):
-    df = pd.read_excel(file, sheet_name=sheet_name, header=1)
-    df.columns = df.columns.str.strip()
-    return df
+df = pd.read_excel(file, sheet_name=sheet_name, header=1)
+df.columns = df.columns.str.strip()
+return df
 
 def round_to_900(price):
-    base = round(price / 1000) * 1000
-    candidate = base - 100
-    return candidate if abs(price - candidate) <= abs(price - (candidate + 1000)) else candidate + 1000
+base = round(price / 1000) * 1000
+candidate = base - 100
+return candidate if abs(price - candidate) <= abs(price - (candidate + 1000)) else candidate + 1000
 
 def to_excel_download(df):
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Output")
-    return buffer.getvalue()
+buffer = BytesIO()
+with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+df.to_excel(writer, index=False, sheet_name="Output")
+return buffer.getvalue()
 
-def calc_predicted_me(new_final_prices, book_prices, qtys, store_sales, me_current, pc_sku_current):
-    pc_new      = (book_prices - new_final_prices) / book_prices
-    price_chg   = (new_final_prices - book_prices * (1 - pc_sku_current)) / (book_prices * (1 - pc_sku_current) + 1e-9)
-    qty_new     = np.maximum(qtys * (1 - price_chg * 2.5), 0)
-    sm_new      = (qty_new * book_prices) / store_sales
-    sm_new      = sm_new / sm_new.sum() if sm_new.sum() > 0 else sm_new
-    pc_store_new = (pc_new * sm_new).sum()
-    me_sku_new  = me_current + ((pc_sku_current - pc_new) * 0.70)
-    return pc_store_new, pc_new, sm_new, qty_new, me_sku_new
+def evaluate(new_final_prices, book_prices, qtys, store_sales, me_store_current, me_sku_current, pc_sku_current):
+# New price cut per SKU
+pc_new = (book_prices - new_final_prices) / book_prices
 
-def solve_new_prices(book_prices, final_prices, qtys, store_sales, me_current, pc_sku_current, me_target):
-    sm_current       = (qtys * book_prices) / store_sales
-    sm_current       = sm_current / sm_current.sum()
-    pc_store_current = (pc_sku_current * sm_current).sum()
+# New qty with sensitivity: 1% price change -> 2.5% qty change
+price_chg = (new_final_prices - book_prices * (1 - pc_sku_current)) / (book_prices * (1 - pc_sku_current) + 1e-9)
+qty_new   = np.maximum(qtys * (1 - price_chg * 2.5), 0)
 
-    best_result, best_diff = None, 999
-    for delta in np.arange(-0.20, 0.20, 0.0005):
-        new_pc    = np.clip(pc_sku_current + delta, 0, 0.6)
-        new_final = np.array([round_to_900(p) for p in book_prices * (1 - new_pc)])
-        pc_store_new, pc_new, sm_new, qty_new, me_sku_new = calc_predicted_me(
-            new_final, book_prices, qtys, store_sales, me_current, pc_sku_current
-        )
-        predicted_me = me_current + ((pc_store_current - pc_store_new) * 0.70)
-        diff = abs(predicted_me - me_target)
-        if diff < best_diff:
-            best_diff   = diff
-            best_result = (new_final, predicted_me, pc_new, sm_new, qty_new, me_sku_new, pc_store_current, pc_store_new)
-    return best_result, best_diff
+# New sales mix
+sm_new = (qty_new * book_prices) / store_sales
+sm_new = sm_new / sm_new.sum() if sm_new.sum() > 0 else sm_new
+
+# New weighted price cut store
+sm_current       = (qtys * book_prices) / store_sales
+sm_current       = sm_current / sm_current.sum()
+pc_store_current = (pc_sku_current * sm_current).sum()
+pc_store_new     = (pc_new * sm_new).sum()
+
+# Predicted ME Store
+predicted_me_store = me_store_current + ((pc_store_current - pc_store_new) * 0.70)
+
+# New ME per SKU
+me_sku_new = me_sku_current + ((pc_sku_current - pc_new) * 0.70)
+
+# Gap ME SKU
+me_sku_gap = me_sku_new.max() - me_sku_new.min()
+
+return predicted_me_store, me_sku_new, me_sku_gap, pc_new, sm_new, qty_new, pc_store_current
+
+def solve_new_prices(book_prices, final_prices, qtys, store_sales, me_store_current, me_sku_current, me_target):
+pc_sku_current = (book_prices - final_prices) / book_prices
+n_sku          = len(book_prices)
+
+best_result       = None
+best_score        = 999
+best_me_diff      = 999
+best_gap          = 999
+
+# Try uniform delta across all SKUs first
+for delta in np.arange(-0.20, 0.20, 0.0005):
+new_pc    = np.clip(pc_sku_current + delta, 0, 0.6)
+new_final = np.array([round_to_900(p) for p in book_prices * (1 - new_pc)])
+
+pred_me, me_sku_new, gap, pc_new, sm_new, qty_new, pc_store_cur = evaluate(
+new_final, book_prices, qtys, store_sales,
+me_store_current, me_sku_current, pc_sku_current
+)
+
+me_diff = abs(pred_me - me_target)
+
+# Score: prioritize ME target first, then gap constraint
+gap_penalty = max(0, gap - 0.03)
+score       = me_diff * 10 + gap_penalty
+
+if score < best_score:
+best_score  = score
+best_me_diff = me_diff
+best_gap    = gap
+best_result = (new_final, pred_me, pc_new, sm_new, qty_new, me_sku_new, pc_store_cur)
+
+# If gap still > 3%, try per-SKU adjustment to bring gap down
+if best_gap > 0.03:
+new_final_base, pred_me_base, pc_new_base, sm_new_base, qty_new_base, me_sku_new_base, pc_store_cur = best_result
+me_sku_mean = me_sku_new_base.mean()
+
+for adj_strength in np.arange(0.001, 0.05, 0.001):
+# Push high ME SKU up in price (higher pc), push low ME SKU down in price (lower pc)
+me_deviation  = me_sku_new_base - me_sku_mean
+pc_adjustment = -me_deviation * adj_strength * 10
+new_pc_adj    = np.clip(pc_new_base + pc_adjustment, 0, 0.6)
+new_final_adj = np.array([round_to_900(p) for p in book_prices * (1 - new_pc_adj)])
+
+pred_me, me_sku_new, gap, pc_new, sm_new, qty_new, pc_store_cur = evaluate(
+new_final_adj, book_prices, qtys, store_sales,
+me_store_current, me_sku_current, pc_sku_current
+)
+
+me_diff    = abs(pred_me - me_target)
+gap_penalty = max(0, gap - 0.03)
+score      = me_diff * 10 + gap_penalty
+
+if score < best_score:
+best_score   = score
+best_me_diff = me_diff
+best_gap     = gap
+best_result  = (new_final_adj, pred_me, pc_new, sm_new, qty_new, me_sku_new, pc_store_cur)
+
+return best_result, best_me_diff, best_gap
 
 # ── Upload File ───────────────────────────────────────────────────
 st.subheader("📁 Upload File")
 uploaded_file = st.file_uploader(
-    "Upload file Excel (.xlsx) — sheet: Promo Input, ME Per Store, Sales Mix",
-    type=["xlsx"]
+Upload file Excel (.xlsx) — sheet: Promo Input, ME Per Store, Sales Mix,
+type=["xlsx"]
 )
 
 df_promo = df_me_store = df_sales = None
 
 if uploaded_file:
-    try:
-        xl = pd.ExcelFile(uploaded_file)
-        required_sheets = ["Promo Input", "ME Per Store", "Sales Mix"]
-        missing = [s for s in required_sheets if s not in xl.sheet_names]
-        if missing:
-            st.error(f"❌ Sheet tidak ditemukan: {', '.join(missing)}")
-            st.stop()
-        else:
-            st.success(f"✅ File berhasil dibaca — sheet: {', '.join(required_sheets)}")
-            df_promo    = read_sheet(uploaded_file, "Promo Input")
-            df_me_store = read_sheet(uploaded_file, "ME Per Store")
-            df_sales    = read_sheet(uploaded_file, "Sales Mix")
-    except Exception as e:
-        st.error(f"❌ Gagal membaca file: {e}")
-        st.stop()
+try:
+xl = pd.ExcelFile(uploaded_file)
+required_sheets = ["Promo Input", "ME Per Store", "Sales Mix"]
+missing = [s for s in required_sheets if s not in xl.sheet_names]
+if missing:
+st.error(f"❌ Sheet tidak ditemukan: {', '.join(missing)}")
+st.stop()
+else:
+st.success(f"✅ File berhasil dibaca — sheet: {', '.join(required_sheets)}")
+df_promo    = read_sheet(uploaded_file, "Promo Input")
+df_me_store = read_sheet(uploaded_file, "ME Per Store")
+df_sales    = read_sheet(uploaded_file, "Sales Mix")
+except Exception as e:
+st.error(f"❌ Gagal membaca file: {e}")
+st.stop()
 
 st.divider()
 
@@ -86,35 +146,34 @@ st.divider()
 selected_week = None
 
 if df_promo is not None:
-    st.subheader("📅 Pilih Minggu")
+st.subheader("📅 Pilih Minggu")
 
-    df_promo['Monday of Week']          = pd.to_datetime(df_promo['Monday of Week'])
-    df_me_store['monday_of_week']       = pd.to_datetime(df_me_store['monday_of_week'])
-    df_sales['monday_of_week']          = pd.to_datetime(df_sales['monday_of_week'])
+df_promo['Monday of Week']    = pd.to_datetime(df_promo['Monday of Week'])
+df_me_store['monday_of_week'] = pd.to_datetime(df_me_store['monday_of_week'])
+df_sales['monday_of_week']    = pd.to_datetime(df_sales['monday_of_week'])
 
-    # Ambil minggu yang ada di ketiga sheet
-    weeks_promo    = set(df_promo['Monday of Week'].dropna().dt.date.unique())
-    weeks_me_store = set(df_me_store['monday_of_week'].dropna().dt.date.unique())
-    weeks_sales    = set(df_sales['monday_of_week'].dropna().dt.date.unique())
-    common_weeks   = sorted(weeks_promo & weeks_me_store & weeks_sales, reverse=True)
+weeks_promo    = set(df_promo['Monday of Week'].dropna().dt.date.unique())
+weeks_me_store = set(df_me_store['monday_of_week'].dropna().dt.date.unique())
+weeks_sales    = set(df_sales['monday_of_week'].dropna().dt.date.unique())
+common_weeks   = sorted(weeks_promo & weeks_me_store & weeks_sales, reverse=True)
 
-    if not common_weeks:
-        st.warning("⚠️ Tidak ada minggu yang sama di ketiga sheet.")
-        st.stop()
+if not common_weeks:
+st.warning("⚠️ Tidak ada minggu yang sama di ketiga sheet.")
+st.stop()
 
-    selected_week = st.selectbox(
-        "Pilih Monday of Week:",
-        options=common_weeks,
-        format_func=lambda x: x.strftime("%d %b %Y")
-    )
+selected_week = st.selectbox(
+Pilih Monday of Week:,
+options=common_weeks,
+format_func=lambda x: x.strftime("%d %b %Y")
+)
 
 st.divider()
 
 # ── ME Target ────────────────────────────────────────────────────
 st.subheader("🎯 ME Target")
 me_target_input = st.number_input(
-    "Masukkan ME Target (%)", min_value=0.0, max_value=100.0,
-    value=28.0, step=0.1, format="%.1f"
+Masukkan ME Target (%), min_value=0.0, max_value=100.0,
+value=28.0, step=0.1, format="%.1f"
 )
 me_target = me_target_input / 100
 
@@ -124,133 +183,126 @@ st.divider()
 ready = uploaded_file and selected_week is not None
 
 if st.button("🚀 Generate Output", type="primary", use_container_width=True, disabled=not ready):
-    with st.spinner("Memproses data..."):
-        try:
-            # Filter by selected week
-            df_promo_w    = df_promo[df_promo['Monday of Week'].dt.date == selected_week].copy()
-            df_me_store_w = df_me_store[df_me_store['monday_of_week'].dt.date == selected_week].copy()
-            df_sales_w    = df_sales[df_sales['monday_of_week'].dt.date == selected_week].copy()
+with st.spinner("Memproses data..."):
+try:
+# Filter by selected week
+df_promo_w    = df_promo[df_promo['Monday of Week'].dt.date == selected_week].copy()
+df_me_store_w = df_me_store[df_me_store['monday_of_week'].dt.date == selected_week].copy()
+df_sales_w    = df_sales[df_sales['monday_of_week'].dt.date == selected_week].copy()
 
-            if df_promo_w.empty:
-                st.error("❌ Tidak ada data Promo Input untuk minggu ini.")
-                st.stop()
+if df_promo_w.empty:
+st.error("❌ Tidak ada data Promo Input untuk minggu ini.")
+st.stop()
 
-            # ME Per Store (Grab, week tertentu)
-            df_me_store_grab = (
-                df_me_store_w[df_me_store_w['visit_purpose_name'] == 'Grab']
-                .rename(columns={
-                    'visit_purpose_name': 'Platform',
-                    'store_brand_owner':  'Store Brand',
-                    'store_me_percent':   'ME_Store_Pct',
-                    'gross_sales':        'Store_Sales'
-                })
-            )
+# ME Per Store (Grab)
+df_me_store_grab = (
+df_me_store_w[df_me_store_w['visit_purpose_name'] == 'Grab']
+.rename(columns={
+visit_purpose_name': 'Platform',
+store_brand_owner':  'Store Brand',
+store_me_percent':   'ME_Store_Pct',
+gross_sales':        'Store_Sales'
+})
+)
 
-            # Qty total (Grab, week tertentu)
-            df_qty = (
-                df_sales_w[df_sales_w['visit_purpose_name'] == 'Grab']
-                .groupby(['menu_code', 'visit_purpose_name'])['qty_total']
-                .sum()
-                .reset_index()
-                .rename(columns={
-                    'menu_code':          'Menu Code Child',
-                    'visit_purpose_name': 'Platform',
-                    'qty_total':          'Qty'
-                })
-            )
+# Qty total (Grab)
+df_qty = (
+df_sales_w[df_sales_w['visit_purpose_name'] == 'Grab']
+.groupby(['menu_code', 'visit_purpose_name'])['qty_total']
+.sum()
+.reset_index()
+.rename(columns={
+menu_code':          'Menu Code Child',
+visit_purpose_name': 'Platform',
+qty_total':          'Qty'
+})
+)
 
-            # Build base (Grab only)
-            output = df_promo_w[df_promo_w['Platform'] == 'Grab'].copy()
-            output = output.merge(
-                df_me_store_grab[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales']],
-                on=['Platform', 'Store Brand'], how='left'
-            )
-            output = output.merge(df_qty, on=['Menu Code Child', 'Platform'], how='left')
+# Build base (Grab only)
+output = df_promo_w[df_promo_w['Platform'] == 'Grab'].copy()
+output = output.merge(
+df_me_store_grab[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales']],
+on=['Platform', 'Store Brand'], how='left'
+)
+output = output.merge(df_qty, on=['Menu Code Child', 'Platform'], how='left')
 
-            # Current calculations
-            output['ME_SKU']            = pd.to_numeric(output['M/E (%)'], errors='coerce')
-            output['Price_Cut_Current'] = (output['Book Price'] - output['Final Price']) / output['Book Price']
-            output['Sales_Mix_Current'] = (output['Qty'] * output['Book Price']) / output['Store_Sales']
-            total_sm = output['Sales_Mix_Current'].sum()
-            output['Sales_Mix_Current'] = output['Sales_Mix_Current'] / total_sm
+# Current calculations
+output['ME_SKU']            = pd.to_numeric(output['M/E (%)'], errors='coerce')
+output['Price_Cut_Current'] = (output['Book Price'] - output['Final Price']) / output['Book Price']
+output['Sales_Mix_Current'] = (output['Qty'] * output['Book Price']) / output['Store_Sales']
+total_sm = output['Sales_Mix_Current'].sum()
+output['Sales_Mix_Current'] = output['Sales_Mix_Current'] / total_sm
 
-            book_prices    = output['Book Price'].values.astype(float)
-            final_prices   = output['Final Price'].values.astype(float)
-            qtys           = output['Qty'].values.astype(float)
-            store_sales    = output['Store_Sales'].iloc[0]
-            me_current     = output['ME_Store_Pct'].iloc[0]
-            pc_sku_current = output['Price_Cut_Current'].values.astype(float)
-            me_sku         = output['ME_SKU'].values.astype(float)
+book_prices      = output['Book Price'].values.astype(float)
+final_prices     = output['Final Price'].values.astype(float)
+qtys             = output['Qty'].values.astype(float)
+store_sales      = output['Store_Sales'].iloc[0]
+me_store_current = output['ME_Store_Pct'].iloc[0]
+me_sku_current   = output['ME_SKU'].values.astype(float)
 
-            # Solve
-            best_result, best_diff = solve_new_prices(
-                book_prices, final_prices, qtys, store_sales,
-                me_current, pc_sku_current, me_target
-            )
-            new_finals, pred_me, pc_new, sm_new, qty_new, me_sku_new, pc_store_cur, pc_store_new = best_result
+# Solve
+best_result, best_me_diff, best_gap = solve_new_prices(
+book_prices, final_prices, qtys, store_sales,
+me_store_current, me_sku_current, me_target
+)
+new_finals, pred_me, pc_new, sm_new, qty_new, me_sku_new, pc_store_cur = best_result
 
-            output['New_Final_Price']    = new_finals
-            output['New_Price_Cut']      = pc_new
-            output['New_Sales_Mix']      = sm_new
-            output['Predicted_ME_Store'] = pred_me
-            output['New_ME_SKU']         = me_sku_new
+output['New_Final_Price'] = new_finals
+output['New_Price_Cut']   = pc_new
+output['New_Sales_Mix']   = sm_new
+output['New_ME_SKU']      = me_sku_new
 
-            # Max diff check (3%)
-            me_range = me_sku_new.max() - me_sku_new.min()
-            me_flag  = me_range > 0.03
+# ── Display table ─────────────────────────────────────
+display = pd.DataFrame({
+Platform':        output['Platform'],
+Store Brand':     output['Store Brand'],
+Menu Name':       output['Menu Name'],
+Platform Price':  output['Platform Price'].apply(lambda x: f"Rp {x:,.0f}"),
+Book Price':      output['Book Price'].apply(lambda x: f"Rp {x:,.0f}"),
+Final Price':     output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
+Price Cut (cur)': output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
+ME SKU (cur)':    output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
+Qty (cur)':       output['Qty'].apply(lambda x: f"{x:,.0f}"),
+Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
+New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
+New Price Cut':   output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
+New Sales Mix':   output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
+New ME SKU':      output['New_ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
+})
 
-            # ── Display table ─────────────────────────────────────
-            display = pd.DataFrame({
-                'Platform':        output['Platform'],
-                'Store Brand':     output['Store Brand'],
-                'Menu Name':       output['Menu Name'],
-                'Platform Price':  output['Platform Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'Book Price':      output['Book Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'Final Price':     output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'Price Cut (cur)': output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
-                'ME SKU (cur)':    output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
-                'Qty (cur)':       output['Qty'].apply(lambda x: f"{x:,.0f}"),
-                'Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
-                'New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'New Price Cut':   output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
-                'New Sales Mix':   output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
-                'New ME SKU':      output['New_ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
-                'Predicted ME':    output['Predicted_ME_Store'].apply(lambda x: f"{x*100:.2f}%"),
-            })
+# ── Results ───────────────────────────────────────────
+st.divider()
+st.subheader("📤 Output")
 
-            # ── Results ───────────────────────────────────────────
-            st.divider()
-            st.subheader("📤 Output")
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("ME Store Current", f"{me_store_current*100:.2f}%")
+m2.metric("ME Target",        f"{me_target*100:.2f}%")
+m3.metric("Predicted ME",     f"{pred_me*100:.2f}%")
+m4.metric("Diff vs Target",   f"{best_me_diff*100:.3f}%")
 
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("ME Current",     f"{me_current*100:.2f}%")
-            m2.metric("ME Target",      f"{me_target*100:.2f}%")
-            m3.metric("Predicted ME",   f"{pred_me*100:.2f}%")
-            m4.metric("Diff vs Target", f"{abs(pred_me - me_target)*100:.3f}%")
+if best_me_diff <= 0.002:
+st.success(f"✅ Predicted ME {pred_me*100:.2f}% — dalam toleransi ±0.2% dari target")
+else:
+st.warning(f"⚠️ Predicted ME {pred_me*100:.2f}% — di luar toleransi ±0.2% dari target")
 
-            if me_flag:
-                st.warning(f"⚠️ Gap ME antar SKU = {me_range*100:.2f}% — melebihi batas 3%!")
-            else:
-                st.success(f"✅ Gap ME antar SKU = {me_range*100:.2f}% — dalam batas 3%")
+if best_gap <= 0.03:
+st.success(f"✅ Gap ME SKU = {best_gap*100:.2f}% — dalam batas 3%")
+else:
+st.warning(f"⚠️ Gap ME SKU = {best_gap*100:.2f}% — melebihi batas 3%, tidak bisa diselesaikan sepenuhnya")
 
-            if abs(pred_me - me_target) <= 0.002:
-                st.success(f"✅ Predicted ME {pred_me*100:.2f}% — dalam toleransi ±0.2% dari target")
-            else:
-                st.warning(f"⚠️ Predicted ME {pred_me*100:.2f}% — di luar toleransi ±0.2% dari target")
+st.dataframe(display, use_container_width=True)
 
-            st.dataframe(display, use_container_width=True)
+st.download_button(
+label="⬇️ Download Output (Excel)",
+data=to_excel_download(display),
+file_name="promo_approval_output.xlsx",
+mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+use_container_width=True
+)
 
-            st.download_button(
-                label="⬇️ Download Output (Excel)",
-                data=to_excel_download(display),
-                file_name="promo_approval_output.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-
-        except Exception as e:
-            st.error(f"❌ Error: {e}")
-            st.exception(e)
+except Exception as e:
+st.error(f"❌ Error: {e}")
+st.exception(e)
 
 if not ready:
-    st.caption("⬆️ Upload file & pilih minggu dulu untuk mengaktifkan tombol.")
+st.caption("⬆️ Upload file & pilih minggu dulu untuk mengaktifkan tombol.")
