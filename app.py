@@ -48,14 +48,14 @@ def solve_new_prices(book_prices, final_prices, qtys, store_sales, me_current, p
 # ── Upload File ───────────────────────────────────────────────────
 st.subheader("📁 Upload File")
 uploaded_file = st.file_uploader(
-    "Upload file Excel (.xlsx) dengan 3 sheet: Promo Input, M/E Per Store, Sales Mix",
+    "Upload file Excel (.xlsx) dengan 3 sheet: Promo Input, ME Per Store, Sales Mix",
     type=["xlsx"]
 )
 
 if uploaded_file:
     try:
         xl = pd.ExcelFile(uploaded_file)
-        required_sheets = ["Promo Input", "M/E Per Store", "Sales Mix"]
+        required_sheets = ["Promo Input", "ME Per Store", "Sales Mix"]
         missing = [s for s in required_sheets if s not in xl.sheet_names]
         if missing:
             st.error(f"❌ Sheet tidak ditemukan: {', '.join(missing)}")
@@ -83,7 +83,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
     with st.spinner("Memproses data..."):
         try:
             df_promo    = pd.read_excel(uploaded_file, sheet_name="Promo Input")
-            df_me_store = pd.read_excel(uploaded_file, sheet_name="M/E Per Store")
+            df_me_store = pd.read_excel(uploaded_file, sheet_name="ME Per Store")
             df_sales    = pd.read_excel(uploaded_file, sheet_name="Sales Mix")
 
             # Latest ME store (Grab)
