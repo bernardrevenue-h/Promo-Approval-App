@@ -5,13 +5,10 @@ from io import BytesIO
 
 st.set_page_config(page_title="Promo Approval Tool", page_icon="📊", layout="wide")
 st.title("📊 Promo Approval Tool")
-st.markdown("Upload semua file, set M/E Target, lalu klik **Generate Output**.")
+st.markdown("Upload satu file Excel dengan 3 sheet, set M/E Target, lalu klik **Generate Output**.")
 st.divider()
 
 # ── Helpers ──────────────────────────────────────────────────────
-def read_file(file):
-    return pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-
 def round_to_900(price):
     base = round(price / 1000) * 1000
     candidate = base - 100
@@ -48,28 +45,26 @@ def solve_new_prices(book_prices, final_prices, qtys, store_sales, me_current, p
             best_result = (new_final, pred_me, pc_new, sm_new, qty_new)
     return best_result, best_diff
 
-# ── Upload Files ─────────────────────────────────────────────────
-st.subheader("📁 Upload Files")
-col1, col2, col3 = st.columns(3)
-with col1:
-    promo_input = st.file_uploader("1. Promo Input", type=["xlsx", "csv"])
-with col2:
-    me_per_store = st.file_uploader("2. M/E Per Store", type=["xlsx", "csv"])
-with col3:
-    sales_mix = st.file_uploader("3. Sales Mix (Raw Data)", type=["xlsx", "csv"])
+# ── Upload File ───────────────────────────────────────────────────
+st.subheader("📁 Upload File")
+uploaded_file = st.file_uploader(
+    "Upload file Excel (.xlsx) dengan 3 sheet: Promo Input, M/E Per Store, Sales Mix",
+    type=["xlsx"]
+)
 
-st.divider()
-
-# ── Status ───────────────────────────────────────────────────────
-st.subheader("📋 Status Upload")
-files = {"Promo Input": promo_input, "M/E Per Store": me_per_store, "Sales Mix": sales_mix}
-scols = st.columns(3)
-for i, (name, f) in enumerate(files.items()):
-    with scols[i]:
-        if f:
-            st.success(f"✅ {name}")
+if uploaded_file:
+    try:
+        xl = pd.ExcelFile(uploaded_file)
+        required_sheets = ["Promo Input", "M/E Per Store", "Sales Mix"]
+        missing = [s for s in required_sheets if s not in xl.sheet_names]
+        if missing:
+            st.error(f"❌ Sheet tidak ditemukan: {', '.join(missing)}")
+            st.stop()
         else:
-            st.warning(f"⏳ {name}")
+            st.success(f"✅ File berhasil dibaca — sheet ditemukan: {', '.join(required_sheets)}")
+    except Exception as e:
+        st.error(f"❌ Gagal membaca file: {e}")
+        st.stop()
 
 st.divider()
 
@@ -84,14 +79,12 @@ me_target = me_target_input / 100
 st.divider()
 
 # ── Generate ─────────────────────────────────────────────────────
-all_uploaded = all(files.values())
-
-if st.button("🚀 Generate Output", type="primary", use_container_width=True, disabled=not all_uploaded):
+if st.button("🚀 Generate Output", type="primary", use_container_width=True, disabled=not uploaded_file):
     with st.spinner("Memproses data..."):
         try:
-            df_promo    = read_file(promo_input)
-            df_me_store = read_file(me_per_store)
-            df_sales    = read_file(sales_mix)
+            df_promo    = pd.read_excel(uploaded_file, sheet_name="Promo Input")
+            df_me_store = pd.read_excel(uploaded_file, sheet_name="M/E Per Store")
+            df_sales    = pd.read_excel(uploaded_file, sheet_name="Sales Mix")
 
             # Latest ME store (Grab)
             df_me_store['Month'] = pd.to_datetime(df_me_store['Month'])
@@ -202,5 +195,5 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             st.error(f"❌ Error: {e}")
             st.exception(e)
 
-if not all_uploaded:
-    st.caption("⬆️ Upload semua 3 file dulu untuk mengaktifkan tombol.")
+if not uploaded_file:
+    st.caption("⬆️ Upload file Excel dulu untuk mengaktifkan tombol.")
