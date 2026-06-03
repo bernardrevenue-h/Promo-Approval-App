@@ -116,7 +116,7 @@ return best_result, best_me_diff, best_gap
 # ── Upload File ───────────────────────────────────────────────────
 st.subheader("📁 Upload File")
 uploaded_file = st.file_uploader(
-Upload file Excel (.xlsx) — sheet: Promo Input, ME Per Store, Sales Mix,
+Upload file Excel (.xlsx) - sheet: Promo Input, ME Per Store, Sales Mix,
 type=["xlsx"]
 )
 
