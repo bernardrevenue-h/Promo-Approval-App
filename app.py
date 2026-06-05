@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -24,7 +23,6 @@ def to_excel_download(df, price_changed_mask):
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Output")
-        wb = writer.book
         ws = writer.sheets["Output"]
         from openpyxl.styles import PatternFill
         yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
@@ -115,8 +113,7 @@ if uploaded_file:
 st.divider()
 
 # ── Pilih Minggu & Platform ───────────────────────────────────────
-selected_week     = None
-selected_platform = None
+selected_week = selected_platform = None
 
 if df_promo is not None:
     st.subheader("📅 Pilih Minggu & Platform")
@@ -187,7 +184,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 (df_me_plat['Store_Sales'] - df_me_plat['Net_Sales']) / df_me_plat['Store_Sales']
             )
 
-            # Sales Mix - filter by selected platform only
+            # Sales Mix - filter by selected platform + store brand
             df_qty = (
                 df_sales_w[df_sales_w['visit_purpose_name'] == selected_platform]
                 .groupby(['menu_code', 'visit_purpose_name', 'store_brand_owner'])['qty_total']
@@ -303,7 +300,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             )
 
             st.download_button(
-                label="⬇️ Download Output (Excel)",
+                label="Download Output (Excel)",
                 data=to_excel_download(display, price_changed),
                 file_name="promo_approval_output.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -316,3 +313,4 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
 
 if not ready:
     st.caption("Upload file, pilih minggu & platform dulu untuk mengaktifkan tombol.")
+
