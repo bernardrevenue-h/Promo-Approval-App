@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -113,11 +114,13 @@ if uploaded_file:
 
 st.divider()
 
-# ── Pilih Monday of Week ──────────────────────────────────────────
-selected_week = None
+# ── Pilih Minggu & Platform ───────────────────────────────────────
+selected_week     = None
+selected_platform = None
 
 if df_promo is not None:
-    st.subheader("📅 Pilih Minggu")
+    st.subheader("📅 Pilih Minggu & Platform")
+
     df_promo['Monday of Week']    = pd.to_datetime(df_promo['Monday of Week'])
     df_me_store['monday_of_week'] = pd.to_datetime(df_me_store['monday_of_week'])
     df_sales['monday_of_week']    = pd.to_datetime(df_sales['monday_of_week'])
@@ -131,11 +134,16 @@ if df_promo is not None:
         st.warning("Tidak ada minggu yang sama di ketiga sheet.")
         st.stop()
 
-    selected_week = st.selectbox(
-        "Pilih Monday of Week:",
-        options=common_weeks,
-        format_func=lambda x: x.strftime("%d %b %Y")
-    )
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_week = st.selectbox(
+            "Pilih Monday of Week:",
+            options=common_weeks,
+            format_func=lambda x: x.strftime("%d %b %Y")
+        )
+    with col2:
+        available_platforms = sorted(df_promo['Platform'].dropna().unique().tolist())
+        selected_platform   = st.selectbox("Pilih Platform:", options=available_platforms)
 
 st.divider()
 
@@ -150,11 +158,12 @@ me_target = me_target_input / 100
 st.divider()
 
 # ── Generate ─────────────────────────────────────────────────────
-ready = uploaded_file and selected_week is not None
+ready = uploaded_file and selected_week is not None and selected_platform is not None
 
 if st.button("🚀 Generate Output", type="primary", use_container_width=True, disabled=not ready):
     with st.spinner("Memproses data..."):
         try:
+            # Filter by week
             df_promo_w    = df_promo[df_promo['Monday of Week'].dt.date == selected_week].copy()
             df_me_store_w = df_me_store[df_me_store['monday_of_week'].dt.date == selected_week].copy()
             df_sales_w    = df_sales[df_sales['monday_of_week'].dt.date == selected_week].copy()
@@ -163,9 +172,9 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 st.error("Tidak ada data Promo Input untuk minggu ini.")
                 st.stop()
 
-            # ME Per Store (Grab)
-            df_me_grab = (
-                df_me_store_w[df_me_store_w['visit_purpose_name'] == 'Grab']
+            # ME Per Store - filter by selected platform
+            df_me_plat = (
+                df_me_store_w[df_me_store_w['visit_purpose_name'] == selected_platform]
                 .rename(columns={
                     'visit_purpose_name': 'Platform',
                     'store_brand_owner':  'Store Brand',
@@ -174,30 +183,38 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                     'net_sales':          'Net_Sales'
                 })
             )
-            df_me_grab['Price_Cut_BD_GP'] = (
-                (df_me_grab['Store_Sales'] - df_me_grab['Net_Sales']) / df_me_grab['Store_Sales']
+            df_me_plat['Price_Cut_BD_GP'] = (
+                (df_me_plat['Store_Sales'] - df_me_plat['Net_Sales']) / df_me_plat['Store_Sales']
             )
 
-            # Qty total (Grab)
+            # Sales Mix - filter by selected platform only
             df_qty = (
-                df_sales_w[df_sales_w['visit_purpose_name'] == 'Grab']
-                .groupby(['menu_code', 'visit_purpose_name'])['qty_total']
+                df_sales_w[df_sales_w['visit_purpose_name'] == selected_platform]
+                .groupby(['menu_code', 'visit_purpose_name', 'store_brand_owner'])['qty_total']
                 .sum()
                 .reset_index()
                 .rename(columns={
                     'menu_code':          'Menu Code Child',
                     'visit_purpose_name': 'Platform',
-                    'qty_total':          'Qty'
+                    'store_brand_owner':  'Store Brand',
+                    'qty_total':          'Qty_Raw'
                 })
             )
 
-            # Build base
-            output = df_promo_w[df_promo_w['Platform'] == 'Grab'].copy()
+            # Build base - filter promo by selected platform
+            output = df_promo_w[df_promo_w['Platform'] == selected_platform].copy()
             output = output.merge(
-                df_me_grab[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales', 'Net_Sales', 'Price_Cut_BD_GP']],
+                df_me_plat[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales', 'Net_Sales', 'Price_Cut_BD_GP']],
                 on=['Platform', 'Store Brand'], how='left'
             )
-            output = output.merge(df_qty, on=['Menu Code Child', 'Platform'], how='left')
+            output = output.merge(
+                df_qty[['Menu Code Child', 'Platform', 'Store Brand', 'Qty_Raw']],
+                on=['Menu Code Child', 'Platform', 'Store Brand'], how='left'
+            )
+
+            # Qty = qty_raw / Divider
+            output['Divider'] = pd.to_numeric(output['Divider'], errors='coerce').fillna(1)
+            output['Qty']     = output['Qty_Raw'] / output['Divider']
 
             # Current calculations
             output['ME_SKU']            = pd.to_numeric(output['M/E (%)'], errors='coerce')
@@ -242,7 +259,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 'Final Price':     output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'Price Cut (cur)': output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
                 'ME SKU (cur)':    output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
-                'Qty (cur)':       output['Qty'].apply(lambda x: f"{x:,.0f}"),
+                'Qty (cur)':       output['Qty'].apply(lambda x: f"{x:,.1f}"),
                 'Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
                 'New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'New Price Cut':   output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
@@ -298,4 +315,4 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             st.exception(e)
 
 if not ready:
-    st.caption("Upload file & pilih minggu dulu untuk mengaktifkan tombol.")
+    st.caption("Upload file, pilih minggu & platform dulu untuk mengaktifkan tombol.")
