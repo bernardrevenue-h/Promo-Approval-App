@@ -27,7 +27,6 @@ def to_excel_download(df, price_changed_mask):
         ws = writer.sheets["Output"]
         from openpyxl.styles import PatternFill
         yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        # Row 2 onwards (row 1 = header)
         for i, changed in enumerate(price_changed_mask):
             if changed:
                 for col in range(1, len(df.columns) + 1):
@@ -42,8 +41,8 @@ def evaluate(new_final_prices, book_prices, qtys, store_sales, me_store_current,
     sm_new    = sm_new / sm_new.sum() if sm_new.sum() > 0 else sm_new
     sm_cur    = (qtys * book_prices) / store_sales
     sm_cur    = sm_cur / sm_cur.sum()
-    pc_store_current  = (pc_sku_current * sm_cur).sum()
-    pc_store_new      = (pc_new * sm_new).sum()
+    pc_store_current   = (pc_sku_current * sm_cur).sum()
+    pc_store_new       = (pc_new * sm_new).sum()
     predicted_me_store = me_store_current + ((pc_store_current - pc_store_new) * 0.70)
     me_sku_new         = me_sku_current + ((pc_sku_current - pc_new) * 0.70)
     me_sku_gap         = me_sku_new.max() - me_sku_new.min()
@@ -66,9 +65,8 @@ def solve_new_prices(book_prices, final_prices, qtys, store_sales, me_store_curr
             best_score, best_me_diff, best_gap = score, me_diff, gap
             best_result = (new_final, pred_me, pc_new, sm_new, qty_new, me_sku_new, pc_store_cur)
 
-    # Per-SKU adjustment if gap still > 3%
     if best_gap > 0.03:
-        new_final_base, pred_me_base, pc_new_base, sm_new_base, qty_new_base, me_sku_new_base, pc_store_cur = best_result
+        new_final_base, _, pc_new_base, _, _, me_sku_new_base, _ = best_result
         me_sku_mean = me_sku_new_base.mean()
         for adj_strength in np.arange(0.001, 0.05, 0.001):
             me_deviation  = me_sku_new_base - me_sku_mean
@@ -119,7 +117,7 @@ st.divider()
 selected_week = None
 
 if df_promo is not None:
-    st.subheader("Pilih Minggu")
+    st.subheader("📅 Pilih Minggu")
     df_promo['Monday of Week']    = pd.to_datetime(df_promo['Monday of Week'])
     df_me_store['monday_of_week'] = pd.to_datetime(df_me_store['monday_of_week'])
     df_sales['monday_of_week']    = pd.to_datetime(df_sales['monday_of_week'])
@@ -142,7 +140,7 @@ if df_promo is not None:
 st.divider()
 
 # ── ME Target ────────────────────────────────────────────────────
-st.subheader("ME Target")
+st.subheader("🎯 ME Target")
 me_target_input = st.number_input(
     "Masukkan ME Target (%)", min_value=0.0, max_value=100.0,
     value=28.0, step=0.1, format="%.1f"
@@ -154,7 +152,7 @@ st.divider()
 # ── Generate ─────────────────────────────────────────────────────
 ready = uploaded_file and selected_week is not None
 
-if st.button("Generate Output", type="primary", use_container_width=True, disabled=not ready):
+if st.button("🚀 Generate Output", type="primary", use_container_width=True, disabled=not ready):
     with st.spinner("Memproses data..."):
         try:
             df_promo_w    = df_promo[df_promo['Monday of Week'].dt.date == selected_week].copy()
@@ -176,8 +174,6 @@ if st.button("Generate Output", type="primary", use_container_width=True, disabl
                     'net_sales':          'Net_Sales'
                 })
             )
-
-            # Price Cut BD GP = (gross_sales - net_sales) / gross_sales
             df_me_grab['Price_Cut_BD_GP'] = (
                 (df_me_grab['Store_Sales'] - df_me_grab['Net_Sales']) / df_me_grab['Store_Sales']
             )
@@ -218,6 +214,9 @@ if st.button("Generate Output", type="primary", use_container_width=True, disabl
             me_sku_current   = output['ME_SKU'].values.astype(float)
             pc_bd_gp         = output['Price_Cut_BD_GP'].iloc[0]
 
+            # Weighted price cut current
+            pc_weighted_current = (output['Price_Cut_Current'].values * output['Sales_Mix_Current'].values).sum()
+
             # Solve
             best_result, best_me_diff, best_gap = solve_new_prices(
                 book_prices, final_prices, qtys, store_sales,
@@ -235,32 +234,35 @@ if st.button("Generate Output", type="primary", use_container_width=True, disabl
 
             # ── Display table ─────────────────────────────────────
             display = pd.DataFrame({
-                'Platform':           output['Platform'],
-                'Store Brand':        output['Store Brand'],
-                'Menu Name':          output['Menu Name'],
-                'Platform Price':     output['Platform Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'Book Price':         output['Book Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'Final Price':        output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'Price Cut (cur)':    output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
-                'ME SKU (cur)':       output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
-                'Qty (cur)':          output['Qty'].apply(lambda x: f"{x:,.0f}"),
-                'Sales Mix (cur)':    output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
-                'Price Cut BD GP':    f"{pc_bd_gp*100:.2f}%",
-                'New Final Price':    output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
-                'New Price Cut':      output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
-                'New Sales Mix':      output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
-                'New ME SKU':         output['New_ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
+                'Platform':        output['Platform'],
+                'Store Brand':     output['Store Brand'],
+                'Menu Name':       output['Menu Name'],
+                'Platform Price':  output['Platform Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'Book Price':      output['Book Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'Final Price':     output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'Price Cut (cur)': output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
+                'ME SKU (cur)':    output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
+                'Qty (cur)':       output['Qty'].apply(lambda x: f"{x:,.0f}"),
+                'Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
+                'New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
+                'New Price Cut':   output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
+                'New Sales Mix':   output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
+                'New ME SKU':      output['New_ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
             })
 
             # ── Results ───────────────────────────────────────────
             st.divider()
-            st.subheader("Output")
+            st.subheader("📤 Output")
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("ME Store Current", f"{me_store_current*100:.2f}%")
             m2.metric("ME Target",        f"{me_target*100:.2f}%")
             m3.metric("Predicted ME",     f"{pred_me*100:.2f}%")
             m4.metric("Diff vs Target",   f"{best_me_diff*100:.3f}%")
+
+            m5, m6 = st.columns(2)
+            m5.metric("Price Cut BD GP",          f"{pc_bd_gp*100:.2f}%")
+            m6.metric("Price Cut Weighted (cur)",  f"{pc_weighted_current*100:.2f}%")
 
             if best_me_diff <= 0.002:
                 st.success(f"Predicted ME {pred_me*100:.2f}% - dalam toleransi +/-0.2% dari target")
@@ -272,11 +274,10 @@ if st.button("Generate Output", type="primary", use_container_width=True, disabl
             else:
                 st.warning(f"Gap ME SKU = {best_gap*100:.2f}% - melebihi batas 3%")
 
-            # Color code yellow for changed rows
             def highlight_changed(row):
                 idx = row.name
                 if idx < len(price_changed) and price_changed[idx]:
-                    return ['background-color: #FFFF00'] * len(row)
+                    return ['background-color: #FFFF00; color: black'] * len(row)
                 return [''] * len(row)
 
             st.dataframe(
@@ -285,7 +286,7 @@ if st.button("Generate Output", type="primary", use_container_width=True, disabl
             )
 
             st.download_button(
-                label="Download Output (Excel)",
+                label="⬇️ Download Output (Excel)",
                 data=to_excel_download(display, price_changed),
                 file_name="promo_approval_output.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
