@@ -12,6 +12,9 @@ st.divider()
 def read_sheet(file, sheet_name):
     df = pd.read_excel(file, sheet_name=sheet_name, header=1)
     df.columns = df.columns.str.strip()
+    # Normalize platform column name
+    if 'Visit_Purpose_Name' in df.columns:
+        df = df.rename(columns={'Visit_Purpose_Name': 'Platform'})
     return df
 
 def round_to_900(price):
@@ -160,7 +163,6 @@ ready = uploaded_file and selected_week is not None and selected_platform is not
 if st.button("🚀 Generate Output", type="primary", use_container_width=True, disabled=not ready):
     with st.spinner("Memproses data..."):
         try:
-            # Filter by week
             df_promo_w    = df_promo[df_promo['Monday of Week'].dt.date == selected_week].copy()
             df_me_store_w = df_me_store[df_me_store['monday_of_week'].dt.date == selected_week].copy()
             df_sales_w    = df_sales[df_sales['monday_of_week'].dt.date == selected_week].copy()
@@ -198,7 +200,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 })
             )
 
-            # Build base - filter promo by selected platform
+            # Build base
             output = df_promo_w[df_promo_w['Platform'] == selected_platform].copy()
             output = output.merge(
                 df_me_plat[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales', 'Net_Sales', 'Price_Cut_BD_GP']],
@@ -243,7 +245,6 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             output['New_Sales_Mix']   = sm_new
             output['New_ME_SKU']      = me_sku_new
 
-            # Price changed mask
             price_changed = output['New_Final_Price'].values != output['Final Price'].values
 
             # ── Display table ─────────────────────────────────────
@@ -275,8 +276,8 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             m4.metric("Diff vs Target",   f"{best_me_diff*100:.3f}%")
 
             m5, m6 = st.columns(2)
-            m5.metric("Price Cut BD GP",          f"{pc_bd_gp*100:.2f}%")
-            m6.metric("Price Cut Weighted (cur)",  f"{pc_weighted_current*100:.2f}%")
+            m5.metric("Price Cut BD GP",         f"{pc_bd_gp*100:.2f}%")
+            m6.metric("Price Cut Weighted (cur)", f"{pc_weighted_current*100:.2f}%")
 
             if best_me_diff <= 0.002:
                 st.success(f"Predicted ME {pred_me*100:.2f}% - dalam toleransi +/-0.2% dari target")
