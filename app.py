@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Promo Approval Tool", page_icon="📊", layout="wide")
 st.title("📊 Promo Approval Tool")
@@ -21,17 +23,54 @@ def round_to_900(price):
     candidate = base - 100
     return candidate if abs(price - candidate) <= abs(price - (candidate + 1000)) else candidate + 1000
 
-def to_excel_download(df, price_changed_mask):
+def to_excel_download(df, price_changed_mask, summary_df):
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Output")
-        ws = writer.sheets["Output"]
-        from openpyxl.styles import PatternFill
-        yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        # Write summary first
+        summary_df.to_excel(writer, index=False, sheet_name="Summary")
+        # Write detail
+        df.to_excel(writer, index=False, sheet_name="Detail")
+
+        # ── Format Summary sheet ──────────────────────────────────
+        ws_sum = writer.sheets["Summary"]
+        yellow = PatternFill(start_color="FFD700", end_color="FFD700", fill_type="solid")
+        header_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        for col in range(1, 3):
+            cell = ws_sum.cell(row=1, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+        ws_sum.column_dimensions['A'].width = 35
+        ws_sum.column_dimensions['B'].width = 20
+
+        # ── Format Detail sheet ───────────────────────────────────
+        ws = writer.sheets["Detail"]
+        header_fill2 = PatternFill(start_color="1A5276", end_color="1A5276", fill_type="solid")
+        row_fill_alt = PatternFill(start_color="EAF2FF", end_color="EAF2FF", fill_type="solid")
+        yellow_row   = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+
+        # Header row
+        for col in range(1, len(df.columns) + 1):
+            cell = ws.cell(row=1, column=col)
+            cell.fill = header_fill2
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(horizontal="center")
+
+        # Data rows
         for i, changed in enumerate(price_changed_mask):
-            if changed:
-                for col in range(1, len(df.columns) + 1):
-                    ws.cell(row=i + 2, column=col).fill = yellow
+            for col in range(1, len(df.columns) + 1):
+                cell = ws.cell(row=i + 2, column=col)
+                cell.alignment = Alignment(horizontal="center")
+                if changed:
+                    cell.fill = yellow_row
+                elif i % 2 == 1:
+                    cell.fill = row_fill_alt
+
+        # Auto width
+        for col in ws.columns:
+            max_len = max((len(str(cell.value)) for cell in col if cell.value), default=10)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 30)
+
     return buffer.getvalue()
 
 def evaluate(new_final_prices, book_prices, qtys, store_sales, me_store_current, me_sku_current, pc_sku_current):
@@ -147,7 +186,7 @@ if df_promo is not None:
 st.divider()
 
 # ── ME Target ────────────────────────────────────────────────────
-st.subheader("🎯 ME Target")
+st.subheader("🎯 ME BD GP Target")
 me_target_input = st.number_input(
     "Masukkan ME BD GP Target (%)", min_value=0.0, max_value=100.0,
     value=28.0, step=0.1, format="%.1f"
@@ -185,29 +224,30 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 (df_me_plat['Store_Sales'] - df_me_plat['Net_Sales']) / df_me_plat['Store_Sales']
             )
 
-            # Net price map dari promo input untuk SUMIFS
+            # Net price map: menu_code + net_price (SUMIFS key)
             net_price_map = (
                 df_promo_w[df_promo_w['Platform'] == selected_platform][['Menu Code Child', 'Net Price']]
                 .drop_duplicates()
                 .rename(columns={'Menu Code Child': 'menu_code', 'Net Price': 'promo_net_price'})
             )
 
-            # Sales Mix - filter platform + net price match
+            # Sales Mix - filter platform + SUMIFS by menu_code + net_price
             df_sales_filtered = df_sales_w[df_sales_w['visit_purpose_name'] == selected_platform].copy()
-            df_sales_filtered = df_sales_filtered.merge(net_price_map, on='menu_code', how='left')
+            df_sales_filtered = df_sales_filtered.merge(net_price_map, on='menu_code', how='inner')
             df_sales_filtered = df_sales_filtered[
                 df_sales_filtered['net_price'] == df_sales_filtered['promo_net_price']
             ]
 
             df_qty = (
                 df_sales_filtered
-                .groupby(['menu_code', 'visit_purpose_name', 'store_brand_owner'])['qty_total']
+                .groupby(['menu_code', 'visit_purpose_name', 'store_brand_owner', 'promo_net_price'])['qty_total']
                 .sum()
                 .reset_index()
                 .rename(columns={
                     'menu_code':          'Menu Code Child',
                     'visit_purpose_name': 'Platform',
                     'store_brand_owner':  'Store Brand',
+                    'promo_net_price':    'Net Price',
                     'qty_total':          'Qty_Raw'
                 })
             )
@@ -218,9 +258,10 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 df_me_plat[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales', 'Net_Sales', 'Price_Cut_BD_GP']],
                 on=['Platform', 'Store Brand'], how='left'
             )
+            # Join qty by menu_code + platform + store brand + net price
             output = output.merge(
-                df_qty[['Menu Code Child', 'Platform', 'Store Brand', 'Qty_Raw']],
-                on=['Menu Code Child', 'Platform', 'Store Brand'], how='left'
+                df_qty[['Menu Code Child', 'Platform', 'Store Brand', 'Net Price', 'Qty_Raw']],
+                on=['Menu Code Child', 'Platform', 'Store Brand', 'Net Price'], how='left'
             )
 
             # Qty = qty_raw / Divider
@@ -242,7 +283,6 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             me_sku_current   = output['ME_SKU'].values.astype(float)
             pc_bd_gp         = output['Price_Cut_BD_GP'].iloc[0]
 
-            # Weighted price cut current
             pc_weighted_current = (output['Price_Cut_Current'].values * output['Sales_Mix_Current'].values).sum()
 
             # Solve
@@ -257,18 +297,18 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             output['New_Sales_Mix']   = sm_new
             output['New_ME_SKU']      = me_sku_new
 
-            price_changed       = output['New_Final_Price'].values != output['Final Price'].values
-            pc_weighted_new     = (pc_new * sm_new).sum()
+            price_changed   = output['New_Final_Price'].values != output['Final Price'].values
+            pc_weighted_new = (pc_new * sm_new).sum()
 
-            # ── Results ───────────────────────────────────────────
+            # ── Results metrics ───────────────────────────────────
             st.divider()
             st.subheader("📤 Output")
 
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("ME BD GP Current", f"{me_store_current*100:.2f}%")
-            m2.metric("ME BD GP Target",  f"{me_target*100:.2f}%")
+            m1.metric("ME BD GP Current",   f"{me_store_current*100:.2f}%")
+            m2.metric("ME BD GP Target",    f"{me_target*100:.2f}%")
             m3.metric("Predicted ME BD GP", f"{pred_me*100:.2f}%")
-            m4.metric("Diff vs Target",   f"{best_me_diff*100:.3f}%")
+            m4.metric("Diff vs Target",     f"{best_me_diff*100:.3f}%")
 
             if best_me_diff <= 0.002:
                 st.success(f"Predicted ME BD GP {pred_me*100:.2f}% - dalam toleransi +/-0.2% dari target")
@@ -304,12 +344,28 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                     f"{best_gap*100:.2f}%",
                 ]
             })
-            st.dataframe(summary, use_container_width=True, hide_index=True)
+
+            def style_summary(row):
+                if row['Metric'] in ['Predicted ME BD GP', 'ME BD GP Target']:
+                    return ['background-color: #D5F5E3; font-weight: bold'] * 2
+                if row['Metric'] == 'Diff vs Target':
+                    return ['background-color: #FDEBD0'] * 2
+                if 'Price Cut' in row['Metric']:
+                    return ['background-color: #EBF5FB'] * 2
+                return [''] * 2
+
+            st.dataframe(
+                summary.style.apply(style_summary, axis=1),
+                use_container_width=True,
+                hide_index=True
+            )
 
             st.divider()
 
             # ── Detail Table ──────────────────────────────────────
             st.subheader("📋 Detail per SKU")
+            st.caption("🟡 Baris kuning = harga berubah dari current")
+
             display = pd.DataFrame({
                 'Platform':        output['Platform'],
                 'Store Brand':     output['Store Brand'],
@@ -318,29 +374,53 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 'Book Price':      output['Book Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'Final Price':     output['Final Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'PC Current':      output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
-                'ME BD GP (cur)':  output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
-                'Qty (cur)':       output['Qty'].apply(lambda x: f"{x:,.1f}"),
+                'ME BD GP (cur)':  output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "-"),
+                'Qty (cur)':       output['Qty'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "-"),
                 'Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
                 'New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'PC New':          output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
                 'New Sales Mix':   output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
-                'New ME BD GP':    output['New_ME_SKU'].apply(lambda x: f"{x*100:.2f}%"),
+                'New ME BD GP':    output['New_ME_SKU'].apply(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "-"),
             })
 
-            def highlight_changed(row):
+            # Total row
+            total_row = pd.DataFrame([{
+                'Platform':        '',
+                'Store Brand':     '',
+                'Menu Name':       '📌 TOTAL',
+                'Platform Price':  '',
+                'Book Price':      '',
+                'Final Price':     '',
+                'PC Current':      f"{pc_weighted_current*100:.2f}%",
+                'ME BD GP (cur)':  f"{me_store_current*100:.2f}%",
+                'Qty (cur)':       f"{output['Qty'].sum():,.0f}",
+                'Sales Mix (cur)': '100.00%',
+                'New Final Price':  '',
+                'PC New':          f"{pc_weighted_new*100:.2f}%",
+                'New Sales Mix':   '100.00%',
+                'New ME BD GP':    f"{pred_me*100:.2f}%",
+            }])
+            display_with_total = pd.concat([display, total_row], ignore_index=True)
+
+            def highlight_rows(row):
                 idx = row.name
+                if idx == len(display):  # total row
+                    return ['background-color: #2C3E50; color: white; font-weight: bold'] * len(row)
                 if idx < len(price_changed) and price_changed[idx]:
                     return ['background-color: #FFFF00; color: black'] * len(row)
+                if idx % 2 == 1:
+                    return ['background-color: #F2F3F4'] * len(row)
                 return [''] * len(row)
 
             st.dataframe(
-                display.style.apply(highlight_changed, axis=1),
-                use_container_width=True
+                display_with_total.style.apply(highlight_rows, axis=1),
+                use_container_width=True,
+                hide_index=True
             )
 
             st.download_button(
-                label="Download Output (Excel)",
-                data=to_excel_download(display, price_changed),
+                label="⬇️ Download Output (Excel)",
+                data=to_excel_download(display_with_total, list(price_changed) + [False], summary),
                 file_name="promo_approval_output.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
