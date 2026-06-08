@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Promo Approval Tool", page_icon="📊", layout="wide")
@@ -14,8 +14,12 @@ st.divider()
 def read_sheet(file, sheet_name):
     df = pd.read_excel(file, sheet_name=sheet_name, header=1)
     df.columns = df.columns.str.strip()
-    if 'Visit_Purpose_Name' in df.columns:
-        df = df.rename(columns={'Visit_Purpose_Name': 'Platform'})
+    # Normalize column names
+    df = df.rename(columns={
+        'Visit_Purpose_Name': 'Platform',
+        'Net_Price': 'Net Price',
+        'Net Price': 'Net Price',
+    })
     return df
 
 def round_to_900(price):
@@ -23,53 +27,51 @@ def round_to_900(price):
     candidate = base - 100
     return candidate if abs(price - candidate) <= abs(price - (candidate + 1000)) else candidate + 1000
 
-def to_excel_download(df, price_changed_mask, summary_df):
+def to_excel_download(detail_df, price_changed_mask, summary_df):
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        # Write summary first
         summary_df.to_excel(writer, index=False, sheet_name="Summary")
-        # Write detail
-        df.to_excel(writer, index=False, sheet_name="Detail")
+        detail_df.to_excel(writer, index=False, sheet_name="Detail")
 
-        # ── Format Summary sheet ──────────────────────────────────
+        # Format Summary
         ws_sum = writer.sheets["Summary"]
-        yellow = PatternFill(start_color="FFD700", end_color="FFD700", fill_type="solid")
-        header_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
-        header_font = Font(color="FFFFFF", bold=True)
+        hdr = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
         for col in range(1, 3):
-            cell = ws_sum.cell(row=1, column=col)
-            cell.fill = header_fill
-            cell.font = header_font
+            c = ws_sum.cell(row=1, column=col)
+            c.fill = hdr
+            c.font = Font(color="FFFFFF", bold=True)
         ws_sum.column_dimensions['A'].width = 35
         ws_sum.column_dimensions['B'].width = 20
 
-        # ── Format Detail sheet ───────────────────────────────────
+        # Format Detail
         ws = writer.sheets["Detail"]
-        header_fill2 = PatternFill(start_color="1A5276", end_color="1A5276", fill_type="solid")
-        row_fill_alt = PatternFill(start_color="EAF2FF", end_color="EAF2FF", fill_type="solid")
-        yellow_row   = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        hdr2     = PatternFill(start_color="1A5276", end_color="1A5276", fill_type="solid")
+        alt_fill = PatternFill(start_color="EAF2FF", end_color="EAF2FF", fill_type="solid")
+        yel_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        ttl_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
 
-        # Header row
-        for col in range(1, len(df.columns) + 1):
-            cell = ws.cell(row=1, column=col)
-            cell.fill = header_fill2
-            cell.font = Font(color="FFFFFF", bold=True)
-            cell.alignment = Alignment(horizontal="center")
+        for col in range(1, len(detail_df.columns) + 1):
+            c = ws.cell(row=1, column=col)
+            c.fill = hdr2
+            c.font = Font(color="FFFFFF", bold=True)
+            c.alignment = Alignment(horizontal="center")
 
-        # Data rows
         for i, changed in enumerate(price_changed_mask):
-            for col in range(1, len(df.columns) + 1):
-                cell = ws.cell(row=i + 2, column=col)
-                cell.alignment = Alignment(horizontal="center")
-                if changed:
-                    cell.fill = yellow_row
+            is_total = (i == len(price_changed_mask) - 1)
+            for col in range(1, len(detail_df.columns) + 1):
+                c = ws.cell(row=i + 2, column=col)
+                c.alignment = Alignment(horizontal="center")
+                if is_total:
+                    c.fill = ttl_fill
+                    c.font = Font(color="FFFFFF", bold=True)
+                elif changed:
+                    c.fill = yel_fill
                 elif i % 2 == 1:
-                    cell.fill = row_fill_alt
+                    c.fill = alt_fill
 
-        # Auto width
         for col in ws.columns:
-            max_len = max((len(str(cell.value)) for cell in col if cell.value), default=10)
-            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 30)
+            max_len = max((len(str(cell.value or '')) for cell in col), default=10)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 35)
 
     return buffer.getvalue()
 
@@ -220,48 +222,58 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                     'net_sales':          'Net_Sales'
                 })
             )
-            df_me_plat['Price_Cut_BD_GP'] = (
-                (df_me_plat['Store_Sales'] - df_me_plat['Net_Sales']) / df_me_plat['Store_Sales']
-            )
+            # Price Cut BD GP — only if net_sales exists
+            if 'Net_Sales' in df_me_plat.columns:
+                df_me_plat['Price_Cut_BD_GP'] = (
+                    (df_me_plat['Store_Sales'] - df_me_plat['Net_Sales']) / df_me_plat['Store_Sales']
+                )
+            else:
+                df_me_plat['Price_Cut_BD_GP'] = np.nan
 
-            # Net price map: menu_code + net_price (SUMIFS key)
-            net_price_map = (
-                df_promo_w[df_promo_w['Platform'] == selected_platform][['Menu Code Child', 'Net Price']]
+            # Filter promo by platform
+            promo_plat = df_promo_w[df_promo_w['Platform'] == selected_platform].copy()
+
+            # Sales Mix SUMIFS: platform + menu_code + net_price exact match
+            df_sales_plat = df_sales_w[df_sales_w['visit_purpose_name'] == selected_platform].copy()
+
+            # Build net price lookup from promo (menu_code + net_price pairs)
+            net_price_lookup = (
+                promo_plat[['Menu Code Child', 'Net Price']]
                 .drop_duplicates()
                 .rename(columns={'Menu Code Child': 'menu_code', 'Net Price': 'promo_net_price'})
             )
 
-            # Sales Mix - filter platform + SUMIFS by menu_code + net_price
-            df_sales_filtered = df_sales_w[df_sales_w['visit_purpose_name'] == selected_platform].copy()
-            df_sales_filtered = df_sales_filtered.merge(net_price_map, on='menu_code', how='inner')
-            df_sales_filtered = df_sales_filtered[
-                df_sales_filtered['net_price'] == df_sales_filtered['promo_net_price']
+            # Merge sales with net price lookup — match menu_code
+            df_sales_plat = df_sales_plat.merge(net_price_lookup, on='menu_code', how='inner')
+
+            # Keep only rows where net_price == promo_net_price (exact SUMIFS match)
+            df_sales_plat = df_sales_plat[
+                df_sales_plat['net_price'] == df_sales_plat['promo_net_price']
             ]
 
+            # Groupby menu_code + net_price + store_brand
             df_qty = (
-                df_sales_filtered
-                .groupby(['menu_code', 'visit_purpose_name', 'store_brand_owner', 'promo_net_price'])['qty_total']
+                df_sales_plat
+                .groupby(['menu_code', 'promo_net_price', 'store_brand_owner'])['qty_total']
                 .sum()
                 .reset_index()
                 .rename(columns={
-                    'menu_code':          'Menu Code Child',
-                    'visit_purpose_name': 'Platform',
-                    'store_brand_owner':  'Store Brand',
-                    'promo_net_price':    'Net Price',
-                    'qty_total':          'Qty_Raw'
+                    'menu_code':         'Menu Code Child',
+                    'promo_net_price':   'Net Price',
+                    'store_brand_owner': 'Store Brand',
+                    'qty_total':         'Qty_Raw'
                 })
             )
 
-            # Build base
-            output = df_promo_w[df_promo_w['Platform'] == selected_platform].copy()
+            # Build output
+            output = promo_plat.copy()
             output = output.merge(
-                df_me_plat[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales', 'Net_Sales', 'Price_Cut_BD_GP']],
+                df_me_plat[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales', 'Price_Cut_BD_GP']],
                 on=['Platform', 'Store Brand'], how='left'
             )
-            # Join qty by menu_code + platform + store brand + net price
             output = output.merge(
-                df_qty[['Menu Code Child', 'Platform', 'Store Brand', 'Net Price', 'Qty_Raw']],
-                on=['Menu Code Child', 'Platform', 'Store Brand', 'Net Price'], how='left'
+                df_qty[['Menu Code Child', 'Net Price', 'Store Brand', 'Qty_Raw']],
+                on=['Menu Code Child', 'Net Price', 'Store Brand'], how='left'
             )
 
             # Qty = qty_raw / Divider
@@ -277,13 +289,13 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
 
             book_prices      = output['Book Price'].values.astype(float)
             final_prices     = output['Final Price'].values.astype(float)
-            qtys             = output['Qty'].values.astype(float)
+            qtys             = output['Qty'].fillna(0).values.astype(float)
             store_sales      = output['Store_Sales'].iloc[0]
             me_store_current = output['ME_Store_Pct'].iloc[0]
-            me_sku_current   = output['ME_SKU'].values.astype(float)
+            me_sku_current   = output['ME_SKU'].fillna(0).values.astype(float)
             pc_bd_gp         = output['Price_Cut_BD_GP'].iloc[0]
 
-            pc_weighted_current = (output['Price_Cut_Current'].values * output['Sales_Mix_Current'].values).sum()
+            pc_weighted_current = (output['Price_Cut_Current'].values * output['Sales_Mix_Current'].fillna(0).values).sum()
 
             # Solve
             best_result, best_me_diff, best_gap = solve_new_prices(
@@ -300,7 +312,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             price_changed   = output['New_Final_Price'].values != output['Final Price'].values
             pc_weighted_new = (pc_new * sm_new).sum()
 
-            # ── Results metrics ───────────────────────────────────
+            # ── Results ───────────────────────────────────────────
             st.divider()
             st.subheader("📤 Output")
 
@@ -338,7 +350,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                     f"{me_target*100:.2f}%",
                     f"{pred_me*100:.2f}%",
                     f"{best_me_diff*100:.3f}%",
-                    f"{pc_bd_gp*100:.2f}%",
+                    f"{pc_bd_gp*100:.2f}%" if pd.notna(pc_bd_gp) else "-",
                     f"{pc_weighted_current*100:.2f}%",
                     f"{pc_weighted_new*100:.2f}%",
                     f"{best_gap*100:.2f}%",
@@ -356,15 +368,14 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
 
             st.dataframe(
                 summary.style.apply(style_summary, axis=1),
-                use_container_width=True,
-                hide_index=True
+                use_container_width=True, hide_index=True
             )
 
             st.divider()
 
             # ── Detail Table ──────────────────────────────────────
             st.subheader("📋 Detail per SKU")
-            st.caption("🟡 Baris kuning = harga berubah dari current")
+            st.caption("🟡 Baris kuning = harga berubah | Kolom bergantian abu-abu")
 
             display = pd.DataFrame({
                 'Platform':        output['Platform'],
@@ -376,7 +387,7 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 'PC Current':      output['Price_Cut_Current'].apply(lambda x: f"{x*100:.2f}%"),
                 'ME BD GP (cur)':  output['ME_SKU'].apply(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "-"),
                 'Qty (cur)':       output['Qty'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "-"),
-                'Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%"),
+                'Sales Mix (cur)': output['Sales_Mix_Current'].apply(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "-"),
                 'New Final Price':  output['New_Final_Price'].apply(lambda x: f"Rp {x:,.0f}"),
                 'PC New':          output['New_Price_Cut'].apply(lambda x: f"{x*100:.2f}%"),
                 'New Sales Mix':   output['New_Sales_Mix'].apply(lambda x: f"{x*100:.2f}%"),
@@ -384,27 +395,30 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             })
 
             # Total row
+            total_qty = output['Qty'].sum()
             total_row = pd.DataFrame([{
                 'Platform':        '',
                 'Store Brand':     '',
-                'Menu Name':       '📌 TOTAL',
+                'Menu Name':       'TOTAL',
                 'Platform Price':  '',
                 'Book Price':      '',
                 'Final Price':     '',
                 'PC Current':      f"{pc_weighted_current*100:.2f}%",
                 'ME BD GP (cur)':  f"{me_store_current*100:.2f}%",
-                'Qty (cur)':       f"{output['Qty'].sum():,.0f}",
+                'Qty (cur)':       f"{total_qty:,.0f}",
                 'Sales Mix (cur)': '100.00%',
                 'New Final Price':  '',
                 'PC New':          f"{pc_weighted_new*100:.2f}%",
                 'New Sales Mix':   '100.00%',
                 'New ME BD GP':    f"{pred_me*100:.2f}%",
             }])
+
             display_with_total = pd.concat([display, total_row], ignore_index=True)
+            price_changed_with_total = list(price_changed) + [False]
 
             def highlight_rows(row):
                 idx = row.name
-                if idx == len(display):  # total row
+                if idx == len(display):
                     return ['background-color: #2C3E50; color: white; font-weight: bold'] * len(row)
                 if idx < len(price_changed) and price_changed[idx]:
                     return ['background-color: #FFFF00; color: black'] * len(row)
@@ -414,13 +428,12 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
 
             st.dataframe(
                 display_with_total.style.apply(highlight_rows, axis=1),
-                use_container_width=True,
-                hide_index=True
+                use_container_width=True, hide_index=True
             )
 
             st.download_button(
                 label="⬇️ Download Output (Excel)",
-                data=to_excel_download(display_with_total, list(price_changed) + [False], summary),
+                data=to_excel_download(display_with_total, price_changed_with_total, summary),
                 file_name="promo_approval_output.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
