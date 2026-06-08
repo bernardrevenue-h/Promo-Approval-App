@@ -28,7 +28,6 @@ def to_excel_download(detail_df, price_changed_mask, summary_df):
         summary_df.to_excel(writer, index=False, sheet_name="Summary")
         detail_df.to_excel(writer, index=False, sheet_name="Detail")
 
-        # Format Summary
         ws_sum = writer.sheets["Summary"]
         hdr = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
         for col in range(1, 3):
@@ -38,7 +37,6 @@ def to_excel_download(detail_df, price_changed_mask, summary_df):
         ws_sum.column_dimensions['A'].width = 32
         ws_sum.column_dimensions['B'].width = 18
 
-        # Format Detail
         ws = writer.sheets["Detail"]
         hdr2     = PatternFill(start_color="1A5276", end_color="1A5276", fill_type="solid")
         alt_fill = PatternFill(start_color="EAF2FF", end_color="EAF2FF", fill_type="solid")
@@ -75,9 +73,7 @@ def evaluate(new_final_prices, book_prices, qtys, store_sales, me_store_current,
     price_chg = (new_final_prices - book_prices * (1 - pc_sku_current)) / (book_prices * (1 - pc_sku_current) + 1e-9)
     qty_new   = np.maximum(qtys * (1 - price_chg * 2.5), 0)
     sm_new    = (qty_new * book_prices) / store_sales
-    sm_new    = sm_new / sm_new.sum() if sm_new.sum() > 0 else sm_new
     sm_cur    = (qtys * book_prices) / store_sales
-    sm_cur    = sm_cur / sm_cur.sum() if sm_cur.sum() > 0 else sm_cur
     pc_store_current   = (pc_sku_current * sm_cur).sum()
     pc_store_new       = (pc_new * sm_new).sum()
     predicted_me_store = me_store_current + ((pc_store_current - pc_store_new) * 0.70)
@@ -206,10 +202,8 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 st.error("Tidak ada data Promo Input untuk minggu ini.")
                 st.stop()
 
-            # Filter promo by platform
             promo_plat = df_promo_w[df_promo_w['Platform'] == selected_platform].copy()
 
-            # ME Per Store - filter by platform
             df_me_plat = (
                 df_me_store_w[df_me_store_w['visit_purpose_name'] == selected_platform]
                 .rename(columns={
@@ -227,7 +221,6 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
             else:
                 df_me_plat['Price_Cut_BD_GP'] = np.nan
 
-            # Sales Mix SUMIFS: platform + menu_code + net_price exact match
             sales_plat = df_sales_w[df_sales_w['visit_purpose_name'] == selected_platform].copy()
             lookup = (
                 promo_plat[['Menu Code Child', 'Net Price']]
@@ -250,7 +243,6 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 })
             )
 
-            # Build output
             output = promo_plat.merge(
                 df_me_plat[['Platform', 'Store Brand', 'ME_Store_Pct', 'Store_Sales', 'Price_Cut_BD_GP']],
                 on=['Platform', 'Store Brand'], how='left'
@@ -260,17 +252,14 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 on=['Menu Code Child', 'Net Price', 'Store Brand'], how='left'
             )
 
-            # Qty = qty_raw / Divider
             output['Divider']  = pd.to_numeric(output['Divider'], errors='coerce').fillna(1)
             output['Qty_Raw']  = output['Qty_Raw'].fillna(0)
             output['Qty']      = output['Qty_Raw'] / output['Divider']
 
-            # Current calculations
+            # ── Current calculations (Sales Mix = Qty * Book Price / Store Gross Sales, NO normalization) ──
             output['ME_SKU']            = pd.to_numeric(output['M/E (%)'], errors='coerce')
             output['Price_Cut_Current'] = (output['Book Price'] - output['Final Price']) / output['Book Price']
             output['Sales_Mix_Current'] = (output['Qty'] * output['Book Price']) / output['Store_Sales']
-            total_sm = output['Sales_Mix_Current'].sum()
-            output['Sales_Mix_Current'] = output['Sales_Mix_Current'] / total_sm
 
             book_prices      = output['Book Price'].values.astype(float)
             final_prices     = output['Final Price'].values.astype(float)
@@ -282,7 +271,6 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
 
             pc_weighted_current = (output['Price_Cut_Current'].values * output['Sales_Mix_Current'].fillna(0).values).sum()
 
-            # Solve
             best_result, best_me_diff, best_gap = solve_new_prices(
                 book_prices, final_prices, qtys, store_sales,
                 me_store_current, me_sku_current, me_target
@@ -319,6 +307,9 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
 
             # ── Summary Table ─────────────────────────────────────
             st.subheader("📊 Summary ME BD GP")
+            total_sm_cur = output['Sales_Mix_Current'].sum()
+            total_sm_new = output['New_Sales_Mix'].sum()
+
             summary = pd.DataFrame({
                 'Metric': [
                     'ME BD GP Current (Store)',
@@ -328,6 +319,8 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                     'Price Cut BD GP (Store)',
                     'Price Cut Weighted - Current',
                     'Price Cut Weighted - New',
+                    'Total Sales Mix - Current',
+                    'Total Sales Mix - New',
                     'Gap ME BD GP antar SKU',
                 ],
                 'Value': [
@@ -338,6 +331,8 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                     f"{pc_bd_gp*100:.2f}%" if pd.notna(pc_bd_gp) else "-",
                     f"{pc_weighted_current*100:.2f}%",
                     f"{pc_weighted_new*100:.2f}%",
+                    f"{total_sm_cur*100:.2f}%",
+                    f"{total_sm_new*100:.2f}%",
                     f"{best_gap*100:.2f}%",
                 ]
             })
@@ -349,6 +344,8 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                     return ['background-color: #FDEBD0'] * 2
                 if 'Price Cut' in row['Metric']:
                     return ['background-color: #EBF5FB'] * 2
+                if 'Sales Mix' in row['Metric']:
+                    return ['background-color: #FEF9E7'] * 2
                 return [''] * 2
 
             st.dataframe(
@@ -382,7 +379,6 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 'New ME SKU':      output['New_ME_SKU'].apply(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "-"),
             })
 
-            # Total row
             total_qty = output['Qty'].sum()
             total_row = pd.DataFrame([{
                 'Platform':        '',
@@ -397,10 +393,10 @@ if st.button("🚀 Generate Output", type="primary", use_container_width=True, d
                 'Net Price':       '',
                 'Divider':         '',
                 'Qty (cur)':       f"{total_qty:,.0f}",
-                'Sales Mix (cur)': '100.00%',
+                'Sales Mix (cur)': f"{total_sm_cur*100:.2f}%",
                 'New Final Price': '',
                 'New Price Cut':   f"{pc_weighted_new*100:.2f}%",
-                'New Sales Mix':   '100.00%',
+                'New Sales Mix':   f"{total_sm_new*100:.2f}%",
                 'New ME SKU':      f"{pred_me*100:.2f}%",
             }])
 
